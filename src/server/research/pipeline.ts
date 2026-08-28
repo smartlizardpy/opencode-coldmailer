@@ -191,7 +191,7 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
     if (cached) {
       const emails = [...new Set((cached.text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? [])
         .map(cleanEmail).filter((e): e is string => !!e))];
-      return { page: { id: cached.id, url: cached.url, title: cached.title, text: cached.text, emails }, links: [] };
+      return { page: { id: cached.id, url: cached.url, title: cached.title, text: cached.text, emails }, links: cached.links };
     }
     const res = await fetcher.fetch(url);
     if (!res.ok || !res.html) {
@@ -199,7 +199,9 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
       return { links: [] };
     }
     const ex = extractPage(res.html, res.finalUrl);
-    const id = storePage(db, res, ex.text, ex.title, companyId);
+    // Store the contact-page candidates, not every link: that is all a later crawl needs, and
+    // a news homepage has hundreds of article links that would bloat the row for nothing.
+    const id = storePage(db, res, ex.text, ex.title, companyId, pickContactPages(ex.links, res.finalUrl, 12));
     return { page: { id, url: res.finalUrl, title: ex.title, text: ex.text, emails: ex.emails }, links: ex.links };
   };
 

@@ -115,3 +115,30 @@ t2("a genuine 404 is NOT retried into a false success", async () => {
     assert.equal(hits, 1, "a 404 is a real answer, not a transient failure");
   } finally { server.close(); }
 });
+
+t2("a cached page still yields its contact links, so a re-crawl does not lose them", async () => {
+  const { openDb } = await import("../../src/server/db/index.ts");
+  const { migrate } = await import("../../src/server/db/migrate.ts");
+  const { storePage, getCachedPage } = await import("../../src/server/research/fetcher.ts");
+  const db = openDb(":memory:"); migrate(db);
+
+  const res = { url: "https://x.com/", finalUrl: "https://x.com/", status: 200,
+    contentType: "text/html", html: "", bytes: 10, ok: true };
+  storePage(db, res as never, "home text", "Home", undefined,
+    ["https://x.com/iletisim", "https://x.com/kunye"]);
+
+  const cached = getCachedPage(db, "https://x.com/");
+  assert.ok(cached, "page should be cached");
+  assert.deepEqual(cached!.links, ["https://x.com/iletisim", "https://x.com/kunye"],
+    "without these, a second crawl stops at the homepage and loses every contact page");
+});
+
+t2("a page stored without links reads back as an empty list, not a crash", async () => {
+  const { openDb } = await import("../../src/server/db/index.ts");
+  const { migrate } = await import("../../src/server/db/migrate.ts");
+  const { storePage, getCachedPage } = await import("../../src/server/research/fetcher.ts");
+  const db = openDb(":memory:"); migrate(db);
+  storePage(db, { url: "https://y.com/", finalUrl: "https://y.com/", status: 200,
+    contentType: "text/html", html: "", bytes: 1, ok: true } as never, "t", "T");
+  assert.deepEqual(getCachedPage(db, "https://y.com/")!.links, []);
+});

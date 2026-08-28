@@ -235,27 +235,37 @@ export class Fetcher {
   }
 }
 
-/** Persist a fetch so quotes can be verified later and pages are never fetched twice. */
-export function storePage(db: Db, r: FetchResult, text: string, title: string, companyId?: string): string {
+/**
+ * Persist a fetch so quotes can be verified later and pages are never fetched twice.
+ *
+ * `links` matters as much as `text`: without it a cache hit returns no links, link discovery
+ * stops at the homepage, and a re-crawl silently loses every contact page it found last time.
+ */
+export function storePage(
+  db: Db, r: FetchResult, text: string, title: string, companyId?: string, links: string[] = [],
+): string {
   const hash = urlHash(r.finalUrl);
   const existing = db.prepare("SELECT id FROM source_page WHERE url_hash = ?").get(hash) as { id: string } | undefined;
+  const linkJson = JSON.stringify(links.slice(0, 200));
   if (existing) {
-    db.prepare("UPDATE source_page SET http_status=?, text=?, title=?, bytes=?, fetched_at=?, error=? WHERE id=?")
-      .run(r.status, text.slice(0, 200_000), title, r.bytes, now(), r.error ?? null, existing.id);
+    db.prepare("UPDATE source_page SET http_status=?, text=?, title=?, bytes=?, fetched_at=?, error=?, links=? WHERE id=?")
+      .run(r.status, text.slice(0, 200_000), title, r.bytes, now(), r.error ?? null, linkJson, existing.id);
     return existing.id;
   }
   const id = ulid();
   db.prepare(
-    "INSERT INTO source_page (id,url,url_hash,company_id,http_status,content_type,title,text,bytes,fetched_at,error) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-  ).run(id, r.finalUrl, hash, companyId ?? null, r.status, r.contentType, title, text.slice(0, 200_000), r.bytes, now(), r.error ?? null);
+    "INSERT INTO source_page (id,url,url_hash,company_id,http_status,content_type,title,text,bytes,fetched_at,error,links) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+  ).run(id, r.finalUrl, hash, companyId ?? null, r.status, r.contentType, title, text.slice(0, 200_000), r.bytes, now(), r.error ?? null, linkJson);
   return id;
 }
 
 export function getCachedPage(db: Db, url: string, maxAgeMs = 7 * 24 * 3600_000):
-  { id: string; url: string; text: string; title: string } | undefined {
-  const row = db.prepare("SELECT id,url,text,title,fetched_at FROM source_page WHERE url_hash = ? AND error IS NULL")
-    .get(urlHash(url)) as { id: string; url: string; text: string; title: string; fetched_at: number } | undefined;
+  { id: string; url: string; text: string; title: string; links: string[] } | undefined {
+  const row = db.prepare("SELECT id,url,text,title,fetched_at,links FROM source_page WHERE url_hash = ? AND error IS NULL")
+    .get(urlHash(url)) as { id: string; url: string; text: string; title: string; fetched_at: number; links: string } | undefined;
   if (!row) return undefined;
   if (Date.now() - row.fetched_at > maxAgeMs) return undefined;
-  return row;
+  let links: string[] = [];
+  try { links = JSON.parse(row.links || "[]") as string[]; } catch { links = []; }
+  return { id: row.id, url: row.url, text: row.text, title: row.title, links };
 }
