@@ -447,71 +447,99 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   /** The whole pipeline for the selected companies, sequentially, with live progress. */
-  r.post("/api/campaigns/:id/run", ({ params }: RouteCtx) =>
-    background(app, `run:${params.id}`, "Researching and drafting", async () => {
-      // Re-running after adding more companies should not redo the ones already finished:
-      // that is minutes of model time and another crawl of a site we have already been polite
-      // to. `redo` forces everything, for when the brief or the target has changed.
-      const redo = body.redo === true;
-      const rows = db.prepare(
-        `SELECT id FROM campaign_company
-         WHERE campaign_id=? AND selected=1 AND status != 'rejected'
-         ${redo ? "" : "AND status NOT IN ('drafted','approved','sent','replied')"}
-         ORDER BY relevance_score DESC NULLS LAST`,
-      ).all(params.id) as Array<{ id: string }>;
-      if (rows.length === 0) {
-        const done = (db.prepare(
-          "SELECT COUNT(*) n FROM campaign_company WHERE campaign_id=? AND selected=1 AND status IN ('drafted','approved','sent','replied')",
-        ).get(params.id) as { n: number }).n;
-        throw bad(done > 0
-          ? `all ${done} ticked companies are already done — tick some new ones, or use Redo to run them again`
-          : "tick at least one company first");
-      }
+  r.post("/api/campaigns/:id/run", ({ params, body }: RouteCtx) => {
+    // Re-running after adding more companies should not redo the ones already finished: that
+    // is minutes of model time and another crawl of a site we have already been polite to.
+    // `redo` forces everything, for when the brief or the target has changed.
+    const redo = body.redo === true;
+    const rows = db.prepare(
+      `SELECT id FROM campaign_company
+       WHERE campaign_id=? AND selected=1 AND status != 'rejected'
+       ${redo ? "" : "AND status NOT IN ('drafted','approved','sent','replied')"}
+       ORDER BY relevance_score DESC NULLS LAST`,
+    ).all(params.id) as Array<{ id: string }>;
+
+    // Checked here rather than inside the job: an error thrown in the background can only
+    // reach the user as a toast, and "there is nothing to do" deserves an immediate answer.
+    if (rows.length === 0) {
+      const done = (db.prepare(
+        "SELECT COUNT(*) n FROM campaign_company WHERE campaign_id=? AND selected=1 AND status IN ('drafted','approved','sent','replied')",
+      ).get(params.id) as { n: number }).n;
+      throw bad(done > 0
+        ? `all ${done} ticked companies are already done — tick some new ones, or use Redo to run them again`
+        : "tick at least one company first");
+    }
+
+    return background(app, `run:${params.id}`, "Researching and drafting", async () => {
       const summary = { companies: rows.length, enriched: 0, contacts: 0, drafts: 0, failures: [] as string[] };
 
       db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), params.id);
 
       // Fetch every selected company's pages first, several hosts at a time. The model stages
-      // below are serialised anyway, so this is where the wall-clock actually comes back.
+      // below are serialised by the queue anyway, so this is where the wall-clock comes back.
       app.bus.emit("run:progress", { campaignId: params.id, index: 0, total: rows.length, stage: "fetching sites" });
       await prefetchCompanies({ db, llm: app.llm, fetcher: app.fetcher }, rows.map((r) => r.id), 4,
         (doneN, total) => app.bus.emit("run:progress", {
           campaignId: params.id, index: doneN, total, stage: "fetching sites",
         }));
 
-      for (const [i, row] of rows.entries()) {
-        const co = db.prepare("SELECT co.name FROM campaign_company cc JOIN company co ON co.id=cc.company_id WHERE cc.id=?").get(row.id) as { name: string };
-        app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "researching" });
-        try {
-          const e = await enrichCompany({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
-          summary.enriched++;
-          if (e.recheck && !e.recheck.matches_target) {
-            summary.failures.push(`${co?.name}: not the target kind - it is a ${e.recheck.entity_kind}`);
-            app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "rejected" });
-            continue;   // do not spend contact-finding or writing on something we just rejected
-          }
-          app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "finding contacts", verified: e.verified });
+      /**
+       * Two companies at a time.
+       *
+       * Every model call here runs in the writing lane, which already allows two concurrent -
+       * so a strictly sequential loop left half that capacity unused and made a 29-company
+       * campaign take twice as long as it needed to. The queue remains the thing that bounds
+       * concurrency; this just stops starving it.
+       */
+      let cursor = 0, finished = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const i = cursor++;
+          if (i >= rows.length) return;
+          const row = rows[i];
+          const co = db.prepare("SELECT co.name FROM campaign_company cc JOIN company co ON co.id=cc.company_id WHERE cc.id=?")
+            .get(row.id) as { name: string } | undefined;
+          const progress = (stage: string, extra: Record<string, unknown> = {}) =>
+            app.bus.emit("run:progress", {
+              campaignId: params.id, index: finished + 1, total: rows.length, company: co?.name, stage, ...extra,
+            });
+          try {
+            progress("researching");
+            const e = await enrichCompany({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
+            summary.enriched++;
+            if (e.recheck && !e.recheck.matches_target) {
+              summary.failures.push(`${co?.name}: not the target kind - it is a ${e.recheck.entity_kind}`);
+              progress("rejected");
+              continue;
+            }
 
-          const f = await findContacts({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
-          summary.contacts += f.added;
-          if (f.added === 0) { summary.failures.push(`${co?.name}: no publishable address`); continue; }
+            progress("finding contacts", { verified: e.verified });
+            const f = await findContacts({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
+            summary.contacts += f.added;
+            if (f.added === 0) { summary.failures.push(`${co?.name}: no publishable address`); continue; }
 
-          const contacts = db.prepare(
-            "SELECT ct.id FROM contact ct JOIN campaign_company cc ON cc.company_id=ct.company_id WHERE cc.id=? ORDER BY ct.confidence DESC",
-          ).all(row.id) as Array<{ id: string }>;
-          app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "writing" });
-          for (const c of contacts) {
-            try { await composeDraft({ db, llm: app.llm }, row.id, c.id); summary.drafts++; }
-            catch (err) { summary.failures.push(`${co?.name}: draft failed - ${(err as Error).message.slice(0, 120)}`); }
+            const contacts = db.prepare(
+              "SELECT ct.id FROM contact ct JOIN campaign_company cc ON cc.company_id=ct.company_id WHERE cc.id=? ORDER BY ct.confidence DESC",
+            ).all(row.id) as Array<{ id: string }>;
+            progress("writing");
+            for (const c of contacts) {
+              try { await composeDraft({ db, llm: app.llm }, row.id, c.id); summary.drafts++; }
+              catch (err) { summary.failures.push(`${co?.name}: draft failed - ${(err as Error).message.slice(0, 120)}`); }
+            }
+          } catch (err) {
+            summary.failures.push(`${co?.name}: ${(err as Error).message.slice(0, 140)}`);
+          } finally {
+            finished++;
           }
-        } catch (err) {
-          summary.failures.push(`${co?.name}: ${(err as Error).message.slice(0, 140)}`);
         }
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(2, rows.length) }, worker));
+
       db.prepare("UPDATE campaign SET status='ready', updated_at=? WHERE id=?").run(now(), params.id);
       app.bus.emit("drafts:changed", { campaignId: params.id });
       return summary;
-    }));
+    });
+  });
 
   /* ------------------------------------------------------------- drafts */
   r.get("/api/campaigns/:id/drafts", ({ params }: RouteCtx) => db.prepare(
