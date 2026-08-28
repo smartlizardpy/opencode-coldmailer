@@ -1,6 +1,10 @@
 /**
  * Draft quality checks.
  *
+ * A check has a FLAG, which the UI turns into a short label, and a DETAIL, which must add the
+ * specifics rather than restate the label - the two are rendered together as
+ * "<label> — <detail>", and a detail that repeats its own label reads as a stutter.
+ *
  * These run when a draft is written so the review screen can surface the weak ones, rather
  * than making a person read forty emails to find the three that are wrong. Every flag is
  * something a careful human reviewer would catch - the point is to put them at the top of the
@@ -84,29 +88,29 @@ export function checkQuality(args: {
   const words = countWords(prose);
 
   if (args.citedClaims === 0) {
-    out.push({ flag: "no_citations", detail: "nothing specific to this company is cited - it will read as a mail-merge" });
+    out.push({ flag: "no_citations", detail: "it will read as a mail-merge" });
   }
-  if (words > 130) out.push({ flag: "too_long", detail: `${words} words; cold email past ~120 gets skimmed` });
-  if (words < 25) out.push({ flag: "too_short", detail: `${words} words; probably missing the reason or the ask` });
+  if (words > 130) out.push({ flag: "too_long", detail: `${words} words — past about 120 it gets skimmed` });
+  if (words < 25) out.push({ flag: "too_short", detail: `${words} words` });
 
   for (const phrase of FLATTERY) {
-    if (body.includes(phrase)) { out.push({ flag: "flattery", detail: `empty praise: "${phrase}"` }); break; }
+    if (body.includes(phrase)) { out.push({ flag: "flattery", detail: `"${phrase}"` }); break; }
   }
   for (const phrase of HEDGING) {
-    if (body.includes(phrase)) { out.push({ flag: "hedging", detail: `hedged offer: "${phrase}"` }); break; }
+    if (body.includes(phrase)) { out.push({ flag: "hedging", detail: `"${phrase}"` }); break; }
   }
   for (const [re, label] of VAGUE_ASK) {
-    if (re.test(args.body)) { out.push({ flag: "vague_ask", detail: `the ask is not answerable: "${label}"` }); break; }
+    if (re.test(args.body)) { out.push({ flag: "vague_ask", detail: `"${label}"` }); break; }
   }
   for (const phrase of PLACEHOLDER) {
-    if (body.includes(phrase)) { out.push({ flag: "placeholder", detail: `unfilled placeholder: "${phrase}"` }); break; }
+    if (body.includes(phrase)) { out.push({ flag: "placeholder", detail: `"${phrase}"` }); break; }
   }
   // A question mark is the cheapest proxy for "is there an ask at all".
   if (!/[?？]/.test(prose) && !/\b(uygun mu|olur mu|paylaşabilir|gönderebilir)\b/i.test(prose)) {
-    out.push({ flag: "no_ask", detail: "no question - the reader is not asked to do anything" });
+    out.push({ flag: "no_ask", detail: "the reader is not asked to do anything" });
   }
-  if (subject.length > 60) out.push({ flag: "subject_too_long", detail: `${subject.length} chars; gets truncated in most clients` });
-  if (subject.endsWith("?")) out.push({ flag: "subject_question", detail: "a question as a subject line reads as a sales email" });
+  if (subject.length > 60) out.push({ flag: "subject_too_long", detail: `${subject.length} characters` });
+  if (subject.endsWith("?")) out.push({ flag: "subject_question", detail: "reads as a sales email" });
 
   return out;
 }

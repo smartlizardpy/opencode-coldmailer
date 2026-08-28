@@ -113,3 +113,39 @@ test("multiple signature lines are all stripped, body is not", () => {
 test("a body with no signature is returned unchanged", () => {
   assert.equal(stripSignature("Just one paragraph, with a question?"), "Just one paragraph, with a question?");
 });
+
+test("a detail adds specifics rather than restating its own label", () => {
+  // The UI renders "<label> — <detail>", so a detail that repeats the label stutters:
+  // "Nothing specific to this company is cited — nothing specific to this company is cited…"
+  const LABEL_WORDS: Record<string, string[]> = {
+    no_citations: ["nothing specific", "cited"],
+    flattery: ["empty praise"],
+    hedging: ["hedged"],
+    vague_ask: ["not answerable", "ask"],
+    placeholder: ["unfilled placeholder"],
+    no_ask: ["no question"],
+    subject_question: ["question as a subject"],
+  };
+  const all = [
+    ...checkQuality({ subject: "quick question?", body: BAD_TR, citedClaims: 0 }),
+    ...checkQuality({ subject: "a".repeat(70), body: "Hi [FirstName].", citedClaims: 0 }),
+  ];
+  assert.ok(all.length > 4, "should have produced a range of flags to check");
+  for (const f of all) {
+    for (const word of LABEL_WORDS[f.flag] ?? []) {
+      assert.ok(!f.detail.toLowerCase().includes(word),
+        `${f.flag}: detail "${f.detail}" repeats "${word}" from its own label`);
+    }
+  }
+});
+
+test("no label contains the separator the UI joins with", () => {
+  // The UI writes "<label> — <detail>". A label with its own em dash produces a double dash.
+  const LABELS = [
+    "Nothing specific to this company is cited", "Longer than a cold email should be",
+    "Very short, so it may be missing the reason or the ask", "Contains empty praise",
+    "The offer is hedged", "The ask isn't answerable", "There's no actual question",
+    "Contains an unfilled placeholder", "Subject will be truncated", "Subject is a question",
+  ];
+  for (const l of LABELS) assert.ok(!l.includes("—"), `"${l}" contains the separator`);
+});

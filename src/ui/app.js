@@ -580,7 +580,7 @@ function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTi
 const FLAG_TEXT = {
   no_citations: "Nothing specific to this company is cited",
   too_long: "Longer than a cold email should be",
-  too_short: "Very short — may be missing the reason or the ask",
+  too_short: "Very short, so it may be missing the reason or the ask",
   flattery: "Contains empty praise",
   hedging: "The offer is hedged",
   vague_ask: "The ask isn't answerable",
