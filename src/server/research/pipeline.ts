@@ -7,7 +7,7 @@
  */
 import type { LlmService } from "../llm/index.ts";
 import { ulid, now, tx, type Db } from "../db/index.ts";
-import { Fetcher, domainOf, getCachedPage, normalizeUrl, storePage } from "./fetcher.ts";
+import { Fetcher, domainOf, getCachedPage, normalizeUrl, sitemapContactUrls, storePage } from "./fetcher.ts";
 import { extractPage, htmlToText, isRoleAccount, pickContactPages, quoteAppearsIn, cleanEmail,
          inferEmailPattern, applyEmailPattern, emailOwnership } from "./extract.ts";
 import * as P from "../llm/prompts.ts";
@@ -214,7 +214,20 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
 
   const first = await visit(home);
   if (first.page) out.push(first.page);
-  const candidates = pickContactPages(first.links, home, maxPages - 1);
+  let candidates = pickContactPages(first.links, home, maxPages - 1);
+
+  // No contact links in the homepage HTML usually means a JavaScript-built nav, not a site
+  // without a contact page. Ask the site for its own URL list before giving up.
+  if (candidates.length === 0 && first.page) {
+    try {
+      const fromSitemap = await sitemapContactUrls(
+        deps.fetcher, home,
+        (path) => pickContactPages([new URL(path, home).toString()], home, 1).length > 0,
+        maxPages - 1,
+      );
+      if (fromSitemap.length) candidates = fromSitemap;
+    } catch { /* a missing or malformed sitemap is not an error */ }
+  }
   for (const url of candidates) {
     if (out.length >= maxPages) break;
     const r = await visit(url);

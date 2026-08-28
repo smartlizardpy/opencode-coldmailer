@@ -208,8 +208,14 @@ export class Fetcher {
         signal: ctrl.signal,
       });
       const contentType = res.headers.get("content-type") ?? "";
-      if (!/text\/html|application\/xhtml/i.test(contentType) && res.ok) {
-        return { ...base, finalUrl: res.url || url, status: res.status, contentType, error: "not html" };
+      // Sitemaps are XML. Everything else we fetch should be a page, so a PDF or an image is
+      // still rejected rather than parsed as if it were markup.
+      const wantsXml = /\.xml(\.gz)?(\?|$)/i.test(url);
+      const okType = wantsXml
+        ? /xml|text\/plain/i.test(contentType)
+        : /text\/html|application\/xhtml/i.test(contentType);
+      if (!okType && res.ok) {
+        return { ...base, finalUrl: res.url || url, status: res.status, contentType, error: `unexpected content type: ${contentType || "none"}` };
       }
 
       // Stream with a hard cap so one huge page cannot exhaust memory.
@@ -233,6 +239,53 @@ export class Fetcher {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * Contact-page candidates from the site's own sitemap.
+ *
+ * Some sites build their navigation in JavaScript, so the homepage HTML contains no links at
+ * all and the crawl stops there. A sitemap is the site telling us its own URLs, so it is both
+ * the politest and the most reliable fallback. Bounded hard: one fetch, one level of index
+ * following, and only URLs that already look like contact pages.
+ */
+export async function sitemapContactUrls(
+  fetcher: { fetch: (u: string) => Promise<FetchResult> },
+  origin: string,
+  matches: (path: string) => boolean,
+  limit = 8,
+): Promise<string[]> {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const scan = async (url: string, depth: number): Promise<void> => {
+    if (depth > 1 || out.length >= limit) return;
+    const res = await fetcher.fetch(url).catch(() => undefined);
+    if (!res?.ok || !res.html) return;
+    const locs = [...res.html.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => m[1]).slice(0, 5_000);
+    const nested: string[] = [];
+    for (const raw of locs) {
+      const loc = raw.replace(/&amp;/g, "&");
+      if (/\.xml(\.gz)?$/i.test(loc)) { nested.push(loc); continue; }
+      let path: string;
+      try {
+        const u = new URL(loc);
+        if (domainOf(u.toString()) !== domainOf(origin)) continue;
+        path = u.pathname;
+      } catch { continue; }
+      if (!matches(path)) continue;
+      const norm = normalizeUrl(loc);
+      if (seen.has(norm)) continue;
+      seen.add(norm);
+      out.push(norm);
+      if (out.length >= limit) return;
+    }
+    // A sitemap index points at other sitemaps; follow only the first couple.
+    for (const n of nested.slice(0, 2)) await scan(n, depth + 1);
+  };
+
+  await scan(new URL("/sitemap.xml", origin).toString(), 0);
+  return out;
 }
 
 /**

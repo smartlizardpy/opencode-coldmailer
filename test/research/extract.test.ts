@@ -254,3 +254,44 @@ t2("an address found only in HTML (not the visible text) is still accepted as on
   assert.ok(!p.text.includes("destek@haberyazilimi.com"),
     "the address is deliberately absent from the visible text - that is the whole point of the obfuscation");
 });
+
+t2("a sitemap supplies contact pages when the homepage nav is JavaScript-built", async () => {
+  const { sitemapContactUrls } = await import("../../src/server/research/fetcher.ts");
+  const { pickContactPages: pick } = await import("../../src/server/research/extract.ts");
+
+  const server = createServer((req, res) => {
+    if (req.url === "/sitemap.xml") {
+      res.writeHead(200, { "content-type": "application/xml" });
+      return res.end(`<?xml version="1.0"?><urlset>
+        <url><loc>http://HOST/</loc></url>
+        <url><loc>http://HOST/haber/2026/bir-sey</loc></url>
+        <url><loc>http://HOST/iletisim</loc></url>
+        <url><loc>http://HOST/kunye</loc></url>
+        <url><loc>http://other.example/iletisim</loc></url>
+      </urlset>`.replace(/HOST/g, req.headers.host!));
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const origin = `http://127.0.0.1:${port}`;
+  try {
+    const f = new Fetcher({ respectRobots: false });
+    const urls = await sitemapContactUrls(f, origin + "/",
+      (path) => pick([new URL(path, origin).toString()], origin + "/", 1).length > 0);
+    const paths = urls.map((u) => new URL(u).pathname).sort();
+    assert.deepEqual(paths, ["/iletisim", "/kunye"],
+      "contact pages only — not articles, and nothing from another domain");
+  } finally { server.close(); }
+});
+
+t2("a missing sitemap is not an error", async () => {
+  const { sitemapContactUrls } = await import("../../src/server/research/fetcher.ts");
+  const server = createServer((_req, res) => { res.writeHead(404); res.end(); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const f = new Fetcher({ respectRobots: false });
+    assert.deepEqual(await sitemapContactUrls(f, `http://127.0.0.1:${port}/`, () => true), []);
+  } finally { server.close(); }
+});
