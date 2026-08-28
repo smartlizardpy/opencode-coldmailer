@@ -23,6 +23,27 @@ function getCampaign(db: Db, campaignId: string) {
   return { campaign: c, product: p };
 }
 
+/**
+ * What THIS campaign is looking for.
+ *
+ * A product's signals describe its customers. A campaign may be aimed at someone else
+ * entirely - partners, content sources, press - so the campaign's own target wins when set.
+ * Falling back to product signals for a campaign with a different audience is how a search
+ * for news sites comes back full of sports academies.
+ */
+export function targetOf(campaign: any, product: any): string {
+  const explicit = String(campaign.target_description ?? "").trim();
+  if (explicit) return explicit;
+  const signals = JSON.parse(product.signals || "[]") as Array<{ signal: string; how_to_check?: string }>;
+  const audience = JSON.parse(product.audience || "{}") as { who?: string; where?: string };
+  const lines = [
+    audience.who ? `Organisations of this kind: ${audience.who}` : "",
+    audience.where ? `Located in: ${audience.where}` : "",
+    ...signals.map((x) => `- ${x.signal}`),
+  ].filter(Boolean);
+  return lines.join("\n") || "Any organisation that would plausibly want what we offer.";
+}
+
 /** The brief as the prompts want to see it. */
 export function briefOf(product: any) {
   return {
@@ -76,10 +97,11 @@ export async function discoverCompanies(
 
   db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), campaignId);
 
+  const target = targetOf(campaign, product);
   const q = await llm.run<{ queries: Array<{ query: string; targets_signal: string }> }>({
     task: "search.queries",
     system: P.SEARCH_QUERIES_SYSTEM,
-    prompt: P.searchQueriesPrompt(brief, campaign.goal, opts.extra ?? ""),
+    prompt: P.searchQueriesPrompt(brief, campaign.goal, target, opts.extra ?? ""),
     schema: P.SEARCH_QUERIES_SCHEMA,
     subject: { type: "campaign", id: campaignId },
   });
@@ -96,7 +118,15 @@ export async function discoverCompanies(
         const r = await llm.run<{ companies: Found[] }>({
           task: "company.enrich",
           system: P.DISCOVER_SYSTEM,
-          prompt: `Search the web for: ${query}\n\nBrief:\n${JSON.stringify(brief, null, 2)}\n\nReport the companies you find that fit the brief. Only companies you actually saw.`,
+          prompt: `Search the web for: ${query}
+
+TARGET - the kind of organisation to find:
+${target}
+
+Who we are (context only - do NOT look for organisations like us):
+${JSON.stringify(brief, null, 2)}
+
+Report only organisations that are genuinely the KIND of thing the target describes, and that you actually saw.`,
           schema: P.DISCOVER_SCHEMA,
           subject: { type: "campaign", id: campaignId },
         });
@@ -184,7 +214,10 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
   return out;
 }
 
-export interface EnrichResult { pages: number; claims: number; verified: number; rejected: string[] }
+export interface EnrichResult {
+  pages: number; claims: number; verified: number; rejected: string[];
+  recheck?: { actual_name: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string };
+}
 
 export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: string): Promise<EnrichResult> {
   const { db, llm } = deps;
@@ -240,7 +273,41 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
     db.prepare("UPDATE campaign_company SET status='qualified', updated_at=? WHERE id=?").run(now(), campaignCompanyId);
   });
 
-  return { pages: pages.length, claims: (r.value.claims ?? []).length, verified, rejected };
+  // Now that we have the real site, check the search result was not simply wrong about what
+  // this organisation is. Search routinely attaches a name from one result to a URL from
+  // another, and a topic match is not a kind match.
+  const campaign = db.prepare("SELECT * FROM campaign WHERE id=?").get(cc.campaign_id) as any;
+  const product = db.prepare("SELECT * FROM product WHERE id=?").get(campaign.product_id) as any;
+  let recheck: EnrichResult["recheck"];
+  try {
+    const rc = await llm.run<{ actual_name: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string }>({
+      task: "company.judge",
+      system: P.RECHECK_SYSTEM,
+      prompt: P.recheckPrompt({
+        target: targetOf(campaign, product),
+        claimedName: company.name, domain: company.domain, pages,
+      }),
+      schema: P.RECHECK_SCHEMA,
+      subject: { type: "campaign_company", id: campaignCompanyId },
+    });
+    recheck = rc.value;
+    tx(db, () => {
+      // Trust the page over the search result for the name.
+      if (rc.value.actual_name && rc.value.actual_name.trim()) {
+        db.prepare("UPDATE company SET name=?, updated_at=? WHERE id=?").run(rc.value.actual_name.trim(), now(), company.id);
+      }
+      db.prepare("UPDATE campaign_company SET relevance_score=?, relevance_reason=?, updated_at=? WHERE id=?")
+        .run(rc.value.fit_score / 100, rc.value.reason, now(), campaignCompanyId);
+      if (!rc.value.matches_target) {
+        db.prepare("UPDATE campaign_company SET status='rejected', selected=0, rejected_reason=?, updated_at=? WHERE id=?")
+          .run(`not the target kind - it is a ${rc.value.entity_kind}`, now(), campaignCompanyId);
+      }
+    });
+  } catch {
+    // A failed recheck must not lose the enrichment we already did.
+  }
+
+  return { pages: pages.length, claims: (r.value.claims ?? []).length, verified, rejected, recheck };
 }
 
 /* ----------------------------------------------------------------- contacts */

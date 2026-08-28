@@ -201,9 +201,9 @@ export function registerRoutes(r: Router, app: AppContext): void {
     if (!product) throw bad("finish the product interview first");
     const id = ulid();
     db.prepare(
-      `INSERT INTO campaign (id,product_id,name,goal,discovery_mode,contacts_per_company,allow_inferred_emails,
-        daily_send_limit,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    ).run(id, product.id, body.name || "Untitled campaign", body.goal || "",
+      `INSERT INTO campaign (id,product_id,name,goal,target_description,discovery_mode,contacts_per_company,
+        allow_inferred_emails,daily_send_limit,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(id, product.id, body.name || "Untitled campaign", body.goal || "", body.target_description || "",
           body.discovery_mode === "manual" ? "manual" : "opencode_search",
           Math.min(5, Math.max(1, Number(body.contacts_per_company) || 3)),
           body.allow_inferred_emails ? 1 : 0,
@@ -218,7 +218,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.post("/api/campaigns/:id/settings", ({ params, body }: RouteCtx) => {
-    for (const k of ["name", "goal", "contacts_per_company", "allow_inferred_emails", "daily_send_limit", "min_gap_seconds", "max_gap_seconds"]) {
+    for (const k of ["name", "goal", "target_description", "contacts_per_company", "allow_inferred_emails", "daily_send_limit", "min_gap_seconds", "max_gap_seconds"]) {
       if (k in body) db.prepare(`UPDATE campaign SET ${k}=?, updated_at=? WHERE id=?`).run(body[k], now(), params.id);
     }
     return db.prepare("SELECT * FROM campaign WHERE id=?").get(params.id);
@@ -226,7 +226,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   r.get("/api/campaigns/:id/companies", ({ params }: RouteCtx) => db.prepare(
     `SELECT cc.id, cc.status, cc.relevance_score, cc.relevance_reason, cc.matched_signal, cc.selected,
-       cc.discovered_via, cc.discovered_url, cc.error_code, cc.error_message,
+       cc.discovered_via, cc.discovered_url, cc.error_code, cc.error_message, cc.rejected_reason,
        co.id company_id, co.name, co.domain, co.website_url, co.city, co.summary,
        (SELECT COUNT(*) FROM claim cl WHERE cl.campaign_company_id=cc.id AND cl.verified=1) verified_claims,
        (SELECT COUNT(*) FROM contact ct WHERE ct.company_id=co.id) contacts,
@@ -283,6 +283,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
         try {
           const e = await enrichCompany({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
           summary.enriched++;
+          if (e.recheck && !e.recheck.matches_target) {
+            summary.failures.push(`${co?.name}: not the target kind - it is a ${e.recheck.entity_kind}`);
+            app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "rejected" });
+            continue;   // do not spend contact-finding or writing on something we just rejected
+          }
           app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "finding contacts", verified: e.verified });
 
           const f = await findContacts({ db, llm: app.llm, fetcher: app.fetcher }, row.id);

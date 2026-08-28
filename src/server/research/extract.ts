@@ -7,8 +7,45 @@
 import * as cheerio from "cheerio";
 import { domainOf, normalizeUrl } from "./fetcher.ts";
 
-/** Pages worth crawling beyond the homepage, best-first. */
-const CONTACT_PATH_RE = /(contact|about|team|people|staff|leadership|our-people|meet|who-we-are|impressum|imprint|legal)/i;
+/**
+ * Pages worth crawling beyond the homepage, best-first.
+ *
+ * Multilingual on purpose. An English-only matcher silently reduces the crawl to the homepage
+ * on every non-English site, which looks exactly like "this company publishes no address"
+ * while the address sits on /iletisim. That failure is invisible unless you check the crawl
+ * log, so the vocabulary below is part of the correctness of the whole pipeline.
+ */
+const CONTACT_WORDS = [
+  // English
+  "contact", "about", "team", "people", "staff", "leadership", "our-people", "meet",
+  "who-we-are", "management", "board", "directory",
+  // Turkish
+  "iletisim", "iletisim-bilgileri", "bize-ulasin", "hakkimizda", "hakkinda", "kurumsal",
+  "ekibimiz", "ekip", "kadro", "antrenorler", "egitmenler", "biz-kimiz", "kunye", "yonetim",
+  // German / Dutch
+  "impressum", "kontakt", "ueber-uns", "team-ueber-uns", "contactgegevens", "over-ons",
+  // French / Spanish / Italian / Portuguese
+  "contacto", "contatti", "contato", "quienes-somos", "nosotros", "chi-siamo",
+  "a-propos", "qui-sommes-nous", "equipe", "equipo",
+  // legal pages that must carry contact details in the EU/TR
+  "imprint", "legal", "mentions-legales", "aviso-legal",
+];
+const CONTACT_PATH_RE = new RegExp(`(${CONTACT_WORDS.join("|")})`, "i");
+
+/**
+ * Fold a URL path to plain ASCII so "/İletişim" and "/iletisim" match the same words.
+ * Percent-decoded first, because that is how these paths usually arrive.
+ */
+export function foldPath(path: string): string {
+  let p = path;
+  try { p = decodeURIComponent(p); } catch { /* keep the raw form */ }
+  return p
+    .toLowerCase()
+    .replace(/ı/g, "i").replace(/İ/g, "i").replace(/ş/g, "s").replace(/ğ/g, "g")
+    .replace(/ü/g, "u").replace(/ö/g, "o").replace(/ç/g, "c")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[_\s]+/g, "-");
+}
 
 /** Addresses that are never a real person and pollute the contact list. */
 const JUNK_EMAIL_RE =
@@ -102,18 +139,22 @@ export function pickContactPages(links: string[], baseUrl: string, limit = 6): s
   const scored = new Map<string, number>();
   for (const link of links) {
     if (domainOf(link) !== base) continue;
-    let path: string;
-    try { path = new URL(link).pathname; } catch { continue; }
-    if (path === "/" || path === "") continue;
+    let rawPath: string;
+    try { rawPath = new URL(link).pathname; } catch { continue; }
+    if (rawPath === "/" || rawPath === "") continue;
+    const path = foldPath(rawPath);
     if (!CONTACT_PATH_RE.test(path)) continue;
     if (path.split("/").filter(Boolean).length > 3) continue;   // avoid deep blog archives
-    // Prefer /contact over /about over the rest, and shorter paths over longer.
+
     let score = 100 - path.length;
-    if (/contact/i.test(path)) score += 60;
-    else if (/team|people|staff|our-people|leadership/i.test(path)) score += 45;
-    else if (/about|who-we-are/i.test(path)) score += 30;
-    else if (/impressum|imprint|legal/i.test(path)) score += 20;
-    scored.set(normalizeUrl(link), Math.max(scored.get(normalizeUrl(link)) ?? 0, score));
+    // Keep these bands in step with CONTACT_WORDS: a word that is crawled but scores in the
+    // wrong band gets ranked below weaker pages and falls off the end of the limit.
+    if (/(contact|iletisim|bize-ulasin|kontakt|contacto|contatti|contato)/.test(path)) score += 60;
+    else if (/(team|eki[pb]|kadro|people|staff|antrenor|egitmen|our-people|equipe|equipo|leadership|management|board)/.test(path)) score += 45;
+    else if (/(about|hakkimizda|hakkinda|kurumsal|who-we-are|biz-kimiz|ueber-uns|over-ons|nosotros|chi-siamo|a-propos|qui-sommes-nous)/.test(path)) score += 30;
+    else score += 20;                                            // imprint / legal / kunye
+    const norm = normalizeUrl(link);
+    scored.set(norm, Math.max(scored.get(norm) ?? 0, score));
   }
   return [...scored.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([u]) => u);
 }

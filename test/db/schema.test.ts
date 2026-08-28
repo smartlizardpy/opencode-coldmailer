@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, tx, ulid, now } from "../../src/server/db/index.ts";
-import { migrate, schemaVersion, recoverAfterCrash } from "../../src/server/db/migrate.ts";
+import { migrate, schemaVersion, recoverAfterCrash, loadMigrations } from "../../src/server/db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "../../src/server/db/settings.ts";
 
 function fresh() {
@@ -34,8 +34,31 @@ function seedChain(db: ReturnType<typeof fresh>) {
 
 test("migrations apply once and are idempotent", () => {
   const db = fresh();
-  assert.equal(schemaVersion(db), 1);
+  // Assert against the migration files on disk, not a hardcoded number, so adding a
+  // migration does not fail this test for the wrong reason.
+  const latest = Math.max(...loadMigrations().map((m) => m.version));
+  assert.equal(schemaVersion(db), latest);
   assert.deepEqual(migrate(db), []);
+});
+
+test("a campaign carries its own target, separate from the product's signals", () => {
+  const db = fresh();
+  const { campaignId } = seedChain(db);
+  // Default is empty - targetOf() then falls back to the product signals.
+  assert.equal((db.prepare("SELECT target_description FROM campaign WHERE id=?").get(campaignId) as any).target_description, "");
+  db.prepare("UPDATE campaign SET target_description=? WHERE id=?").run("small independent news websites", campaignId);
+  assert.equal((db.prepare("SELECT target_description FROM campaign WHERE id=?").get(campaignId) as any).target_description, "small independent news websites");
+});
+
+test("a company can be rejected after we fetch it, with the reason kept", () => {
+  const db = fresh();
+  const { ccId } = seedChain(db);
+  db.prepare("UPDATE campaign_company SET status='rejected', selected=0, rejected_reason=? WHERE id=?")
+    .run("not the target kind - it is a tennis academy", ccId);
+  const row = db.prepare("SELECT status, selected, rejected_reason FROM campaign_company WHERE id=?").get(ccId) as any;
+  assert.equal(row.status, "rejected");
+  assert.equal(row.selected, 0);
+  assert.match(row.rejected_reason, /tennis academy/);
 });
 
 test("footer defaults to OFF", () => {

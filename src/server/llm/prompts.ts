@@ -112,18 +112,38 @@ export const SEARCH_QUERIES_SCHEMA = {
   },
 } as const;
 
-export function searchQueriesPrompt(brief: unknown, goal: string, extra: string): string {
-  return `Brief:\n${JSON.stringify(brief, null, 2)}\n\nCampaign goal: ${goal}\n${extra ? `Extra targeting instructions: ${extra}\n` : ""}
-Write search queries that will surface INDIVIDUAL COMPANIES matching this brief. Prefer queries that return listings, directories or company sites over blog posts. Vary the wording so the queries do not all return the same page.`;
+export function searchQueriesPrompt(brief: unknown, goal: string, target: string, extra: string): string {
+  return `Who we are:\n${JSON.stringify(brief, null, 2)}
+
+Campaign goal: ${goal}
+
+TARGET - the kind of organisation to find:
+${target}
+${extra ? `\nExtra targeting instructions: ${extra}\n` : ""}
+Write search queries that will surface INDIVIDUAL ORGANISATIONS OF THAT KIND. The target is the
+thing being searched for - not us, and not our customers. Prefer queries that return company
+sites over blog posts. Vary the wording so the queries do not all return the same page.`;
 }
 
-export const DISCOVER_SYSTEM = `You find real companies on the web that match a brief.
+export const DISCOVER_SYSTEM = `You find real companies on the web that match a stated target.
 
-Rules you must not break:
+The TARGET tells you what KIND of organisation to look for. It is the primary filter and it
+overrides everything else. If the target says "small independent news websites", then a sports
+club, an academy, a shop or a directory is WRONG no matter how relevant its subject matter is.
+Matching the topic is not the same as matching the kind of organisation.
+
+Before you report a company, ask yourself: is this organisation actually the kind of thing the
+target describes? If it is not, leave it out.
+
+Other rules you must not break:
 - Only report companies you actually saw in search results or on a page you fetched.
 - Every company must have a real website URL you saw. Never guess a domain.
-- If you are not confident a company exists, leave it out. A short accurate list beats a long invented one.
-- Do not report directories, marketplaces, aggregators, franchises' head offices, or the search engine itself as companies.`;
+- The name you report must be the name of the site at that exact domain. Do not attach a name
+  from one search result to a URL from another.
+- If you are not confident a company exists, leave it out. A short accurate list beats a long
+  invented one.
+- Do not report directories, marketplaces, aggregators, or the search engine itself.
+- fit_score is how well it matches THE TARGET, not how interesting it is.`;
 
 export const DISCOVER_SCHEMA = {
   type: "object", additionalProperties: false, required: ["companies"],
@@ -139,6 +159,7 @@ export const DISCOVER_SCHEMA = {
           fit_score: { type: "number", minimum: 0, maximum: 100 },
           reason: { type: "string", maxLength: 200 },
           matched_signal: { type: "string" },
+          entity_kind: { type: "string", description: "what kind of organisation this actually is, in your own words (e.g. 'local news website', 'tennis academy', 'online shop')" },
           source_url: { type: "string", description: "the page you actually saw this company on" },
           city: { type: "string" },
         },
@@ -231,18 +252,45 @@ Who should receive this email, and why? Rank them.`;
 
 /* ---------------------------------------------------------------- composing */
 
-export const COMPOSE_SYSTEM = `You write short cold emails that read like one human wrote to another.
+export const COMPOSE_SYSTEM = `You write short cold emails that read like one busy person wrote to another.
 
-Hard rules:
-- Under 120 words in the body. Plain text only. No HTML, no bullet lists, no bold.
-- Open with something specific and true about THEIR business, drawn only from the verified facts you are given. If you have no verified fact, open plainly instead - never guess or flatter generically.
-- Every sentence that asserts something about them must be traceable to one of the verified facts. List which ones you used in "used_claim_ids".
-- One ask, and make it small. No "let me know if you'd like to hop on a quick call to explore synergies".
-- Subject line: lowercase, six words or fewer, no clickbait, no "quick question".
-- Never claim you are a customer, never invent a mutual connection, never imply you have met.
-- Do not mention that this is automated, and do not apologise for emailing.
-- Write as the sender described in the brief. Match their tone sample.
-- Do NOT write a signature or a sign-off block - that is added separately.`;
+LANGUAGE
+Write in the language the recipient's own website is written in. If their site is Turkish, write
+Turkish - naturally, not translated. Match how people actually write email in that language.
+
+STRUCTURE - three short paragraphs, in this order:
+1. Why you are writing to THEM specifically. Use a verified fact as the REASON, not as a
+   compliment. The fact must connect to the ask: the reader should finish the sentence
+   understanding why they got this email and not someone else.
+2. What you are offering or asking for, concretely. Say the actual thing.
+3. One ask they can answer in a sentence.
+
+BANNED - these are what make an email obviously automated:
+- Any evaluative adjective about them: "dikkat çekici", "etkileyici", "harika", "impressive",
+  "great", "fantastic", "love what you're doing", "really interesting". State facts, never
+  grade them. If you delete the adjective and the sentence still works, the adjective was filler.
+- Stacked hedging: "-abilir/-ebiliriz", "we could potentially", "might be able to". Say what you
+  will do, not what could theoretically happen.
+- Vague joint activity: "birlikte başlamak", "let's explore", "hop on a quick call to discuss
+  synergies", "touch base", "circle back", "partner up". Name the actual next step instead.
+- Anything about yourself before you have given them a reason to keep reading.
+- Apologising for the email, or saying you will "keep it brief".
+
+THE ASK must be answerable. Good: "Denemek isterseniz üç haberinizi bu hafta yayına alabilirim -
+uygun mu?" / "Would Tuesday or Wednesday suit for 15 minutes?" Bad: "Would you like to start this
+together?" - because the reader cannot tell what saying yes commits them to.
+
+FACTS
+- Every sentence asserting something about them must trace to a verified fact you were given.
+  List the ids you used in used_claim_ids.
+- If you have no verified facts, do not invent a reason. Open with the concrete offer instead.
+- Never claim to be a customer, never invent a mutual connection, never imply you have met.
+
+FORM
+- Under 110 words. Plain text. No bullet lists, no bold, no links unless the ask needs one.
+- Subject: lowercase, six words or fewer, a noun phrase naming the actual subject. Not a question,
+  not a verb phrase, not "quick question".
+- Do NOT write a signature or sign-off block - that is added separately.`;
 
 export const COMPOSE_SCHEMA = {
   type: "object", additionalProperties: false, required: ["variants"],
@@ -274,13 +322,15 @@ export function composePrompt(args: {
   return `Who you are:
 ${JSON.stringify(args.brief, null, 2)}
 
-What you want from this email: ${args.goal}
+What you want from this email (this is the ask - make it concrete and answerable):
+${args.goal}
 
 Who you are writing to:
 - Company: ${args.company.name} (${args.company.domain})
 - What they do: ${args.company.summary || "unknown"}
 - Person: ${args.contact.full_name ?? "(no name - this is a shared inbox)"}${args.contact.title ? `, ${args.contact.title}` : ""}
 - Address: ${args.contact.email}${args.contact.is_role_account ? " (a general inbox, so do not open with a first name)" : ""}
+- Their website is ${args.company.domain} - write in the language that site uses.
 
 VERIFIED facts about them. You may only assert things from this list:
 ${facts}
@@ -327,4 +377,48 @@ Their reply:
 ${args.reply}
 
 Write your response.`;
+}
+
+
+/* --------------------------------------------------------- verify after fetching */
+
+export const RECHECK_SYSTEM = `You check whether a company is actually what a web search implied, now that its own website has been fetched.
+
+Search results are often wrong: a name from one result gets attached to a URL from another, or a
+site turns out to be a different kind of organisation entirely. You are the correction step.
+
+Judge ONLY from the page text you are given, never from the name you were told. If the page says
+this is a shooting and hunting club, then it is a shooting and hunting club, whatever the search
+result called it.
+
+Set matches_target=false whenever the organisation is not the KIND of thing the target describes,
+even if its subject matter is related. Being about the right topic is not enough.`;
+
+export const RECHECK_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["actual_name", "entity_kind", "matches_target", "fit_score", "reason"],
+  properties: {
+    actual_name: { type: "string", description: "the organisation's real name, as the page gives it" },
+    entity_kind: { type: "string", description: "what kind of organisation it actually is" },
+    matches_target: { type: "boolean" },
+    fit_score: { type: "number", minimum: 0, maximum: 100 },
+    reason: { type: "string", maxLength: 200 },
+  },
+} as const;
+
+export function recheckPrompt(args: {
+  target: string; claimedName: string; domain: string;
+  pages: Array<{ url: string; title: string; text: string }>;
+}): string {
+  const body = args.pages.map((p) => `--- PAGE ${p.url}\nTITLE: ${p.title}\n${p.text.slice(0, 8_000)}`).join("\n\n");
+  return `TARGET - the kind of organisation we are looking for:
+${args.target}
+
+The search result claimed this domain is: "${args.claimedName}" (${args.domain})
+
+Here is what the site actually says:
+
+${body}
+
+Is this organisation the kind of thing the target describes?`;
 }
