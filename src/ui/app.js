@@ -178,7 +178,7 @@ function openPalette() {
   $("#modal").innerHTML = `
     <div class="scrim" id="scrim">
       <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
-        <input id="palInput" placeholder="Search commands, campaigns, companies…"
+        <input id="palInput" placeholder="Search commands, campaigns, companies…" aria-label="Search commands"
                autocomplete="off" spellcheck="false" aria-controls="palList">
         <div class="palette-list" id="palList" role="listbox"></div>
       </div>
@@ -457,7 +457,7 @@ async function renderCampaigns() {
   $("#content").innerHTML = page(`
     <div class="card">
       <div class="row">
-        <select id="campSelect" style="max-width:340px">
+        <select id="campSelect" aria-label="Select campaign" style="max-width:340px">
           ${S.campaigns.map((c) => `<option value="${esc(c.id)}" ${c.id === camp.id ? "selected" : ""}>
             ${esc(c.name)} — ${c.companies} companies · ${c.drafts} drafts · ${c.sent} sent</option>`).join("")}
         </select>
@@ -473,12 +473,12 @@ async function renderCampaigns() {
     <div class="card">
       <div class="card-head"><h2>Find companies</h2></div>
       <div class="row">
-        <input id="extraTargeting" placeholder="Optional: narrow it, e.g. 'within 20 miles of Durham'" style="flex:1;min-width:220px">
+        <input id="extraTargeting" aria-label="Extra targeting instructions" placeholder="Optional: narrow it, e.g. 'within 20 miles of Durham'" style="flex:1;min-width:220px">
         <button class="btn" id="btnDiscover">${icon("search")} Search the web</button>
       </div>
       <details>
         <summary>Or paste a list of domains</summary>
-        <textarea id="manualList" rows="4" placeholder="one per line:&#10;bethellandco.co.uk Bethell &amp; Co&#10;pta.com.tr"></textarea>
+        <textarea id="manualList" rows="4" aria-label="Domains to add, one per line" placeholder="one per line:&#10;bethellandco.co.uk Bethell &amp; Co&#10;pta.com.tr"></textarea>
         <div class="row"><button class="btn ghost sm" id="btnManual">Add these</button></div>
       </details>
     </div>
@@ -494,8 +494,8 @@ async function renderCampaigns() {
         </span>
       </div>
       <div class="row" style="margin-bottom:var(--s4)">
-        <input id="coFilter" placeholder="Filter by name or domain…" value="${esc(S.filter)}" style="flex:1;min-width:180px">
-        <select id="coStatus" style="max-width:170px">
+        <input id="coFilter" type="search" aria-label="Filter companies" placeholder="Filter by name or domain…" value="${esc(S.filter)}" style="flex:1;min-width:180px">
+        <select id="coStatus" aria-label="Filter by status" style="max-width:170px">
           ${[["all", "All active"], ["selected", "Ticked only"], ["ready", "Have contacts"],
              ["failed", "Failed"], ["rejected", "Rejected"]].map(([v, l]) =>
             `<option value="${v}" ${S.companyFilter === v ? "selected" : ""}>${l}</option>`).join("")}
@@ -520,7 +520,7 @@ async function renderCampaigns() {
             <td><span class="tag ${r.status === "failed" || r.status === "rejected" ? "bad" : ["drafted", "sent", "contacts_found"].includes(r.status) ? "ok" : ""}">${esc(r.status)}</span></td>
             <td class="num">${num(r.verified_claims)}</td>
             <td class="num">${num(r.contacts)}</td>
-            <td><button class="btn sm ghost" data-detail="${esc(r.id)}">${icon("eye")}</button></td>
+            <td><button class="btn sm ghost" data-detail="${esc(r.id)}" aria-label="Evidence for ${esc(r.name)}" title="Evidence">${icon("eye")}</button></td>
           </tr>`).join("")}</tbody></table></div>`
         : empty("binocular", "Nothing here yet",
             S.companies.length ? "No company matches this filter." : "Search the web, or paste a list of domains above.")}
@@ -595,7 +595,7 @@ async function renderReview() {
 
   $("#content").innerHTML = page(`
     <div class="row" style="margin-bottom:var(--s5)">
-      <select id="draftFilter" style="max-width:200px">
+      <select id="draftFilter" aria-label="Filter drafts by status" style="max-width:200px">
         ${[["needs_review", `Needs review (${counts.needs_review})`],
            ["approved", `Approved (${counts.approved})`],
            ["sent", `Sent (${counts.sent})`], ["all", `All (${all.length})`]]
@@ -968,7 +968,7 @@ async function renderProduct() {
             <div class="letter-text" style="font-size:13.5px">${esc(t.content)}</div></div>`).join("")}
         </div>
         <div class="row">
-          <textarea id="answer" rows="2" placeholder="Type your answer…" style="flex:1;min-width:180px"></textarea>
+          <textarea id="answer" rows="2" aria-label="Your answer" placeholder="Type your answer…" style="flex:1;min-width:180px"></textarea>
           <button class="btn" id="btnAnswer">Send</button>
         </div>
         <p class="card-note">⌘/Ctrl + Enter to send.</p>
@@ -1091,7 +1091,7 @@ async function renderSettings() {
       <label class="check" style="margin-top:var(--s4)">
         <input type="checkbox" id="footerEnabled" ${g.footerEnabled ? "checked" : ""}>
         Append an opt-out footer to every email</label>
-      <textarea id="footerText" rows="2" placeholder="e.g. I'm Ozan at WearSide Labs, Durham. Reply 'no thanks' and I won't write again."
+      <textarea id="footerText" rows="2" aria-label="Opt-out footer text" placeholder="e.g. I'm Ozan at WearSide Labs, Durham. Reply 'no thanks' and I won't write again."
         style="margin-top:var(--s2)">${esc(g.footerText ?? "")}</textarea>
       <p class="card-note">Off by default. UK PECR expects an identifiable sender and a way to opt
         out for B2B cold email — it's one checkbox if you want it.</p>
@@ -1101,7 +1101,7 @@ async function renderSettings() {
     <div class="card">
       <div class="card-head"><h2>Never contact</h2><span class="tag">${num(sup.length)}</span></div>
       <div class="row">
-        <input id="supPattern" placeholder="someone@example.com or @example.com" style="flex:1;min-width:200px">
+        <input id="supPattern" aria-label="Address or domain to never contact" placeholder="someone@example.com or @example.com" style="flex:1;min-width:200px">
         <button class="btn ghost" id="btnSuppress">${icon("plus")} Add</button>
       </div>
       <p class="card-note">Checked again at the moment of sending, not just when you approve.

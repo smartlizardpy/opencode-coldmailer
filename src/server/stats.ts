@@ -49,13 +49,18 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     replied: one(db, `SELECT COUNT(*) c FROM reply ${campaignId ? "WHERE campaign_id=?" : ""}`, ...arg),
   };
 
+  // Buckets are LOCAL days. toISOString() would convert local midnight to UTC and label the
+  // bucket with the previous day for anyone east of UTC - in BST every bar would be wrong.
+  const localDay = (d: Date): string =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
   const sendsByDay: Array<{ day: string; sent: number; replies: number }> = [];
   for (let i = 13; i >= 0; i--) {
     const start = new Date(); start.setHours(0, 0, 0, 0);
     start.setDate(start.getDate() - i);
     const from = start.getTime(), to = from + 24 * 3600_000;
     sendsByDay.push({
-      day: start.toISOString().slice(0, 10),
+      day: localDay(start),
       sent: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? AND sent_at<? ${scope}`, from, to, ...arg),
       replies: one(db, `SELECT COUNT(*) c FROM reply WHERE received_at>=? AND received_at<? ${campaignId ? "AND campaign_id=?" : ""}`, from, to, ...arg),
     });

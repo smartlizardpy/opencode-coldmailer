@@ -320,3 +320,12 @@ test("tool calls are logged so a policy violation is forensically inspectable", 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].tool, "webfetch");
 });
+
+test("a schema failure records WHY it failed, not just that it did", async () => {
+  fake.reset([{ text: '{"ok":"yes","city":"Durham"}' }]);
+  const { service, db } = svc();
+  await service.run({ task: "company.judge", system: "s", prompt: "p", schema: SCHEMA }).catch(() => {});
+  const row = db.prepare("SELECT error_message FROM llm_call WHERE ok=0 ORDER BY id DESC LIMIT 1").get() as any;
+  assert.match(row.error_message, /must be boolean/,
+    "the validation error is the only record of why a draft never appeared");
+});

@@ -314,7 +314,12 @@ export class LlmService {
         ctx.model.providerID, ctx.model.modelID, ctx.attempts,
         JSON.stringify(ctx.modelsTried), ctx.repaired ? 1 : 0,
         ctx.toolParts.filter((p) => p.tool === "websearch").length,
-        ctx.ok ? 1 : 0, ctx.err?.code ?? null, ctx.err?.message.slice(0, 1000) ?? null,
+        ctx.ok ? 1 : 0, ctx.err?.code ?? null,
+        // Include the validation errors: "failed schema validation" alone tells you nothing,
+        // and this row is the only record of why a draft never appeared.
+        ctx.err
+          ? [ctx.err.message, ...(ctx.err.validationErrors ?? []).slice(0, 8)].join(" | ").slice(0, 2000)
+          : null,
         Date.now() - ctx.started, ctx.req.prompt.length, ctx.raw.slice(0, 8000),
         ctx.req.subject?.type ?? null, ctx.req.subject?.id ?? null, now(),
       );

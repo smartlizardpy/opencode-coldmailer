@@ -27,11 +27,21 @@ const HEDGING = [
   "i was wondering if", "would it be possible",
 ];
 
-/** Asks the reader cannot act on. */
-const VAGUE_ASK = [
-  "birlikte başlamak", "beraber başlayalım", "ilgilenir misiniz",
-  "let me know if", "let's explore", "touch base", "circle back", "hop on a call",
-  "would you be interested", "if this sounds interesting", "let's connect",
+/**
+ * Asks the reader cannot act on. Regexes rather than literals: Turkish agglutination means
+ * "birlikte başlamak" and "birlikte kısa bir içerikle başlatmak" are the same empty ask, and
+ * a literal list would only catch the first.
+ */
+const VAGUE_ASK: Array<[RegExp, string]> = [
+  [/birlikte\b[^.?!]{0,40}\bbaşla/i, "birlikte … başlamak"],
+  [/beraber\b[^.?!]{0,40}\bbaşla/i, "beraber … başlamak"],
+  [/ilgilenir misiniz/i, "ilgilenir misiniz"],
+  [/görüşmek ister misiniz/i, "görüşmek ister misiniz"],
+  [/let me know if/i, "let me know if"],
+  [/let'?s (explore|connect|chat)/i, "let's explore"],
+  [/touch base|circle back|hop on a (quick )?call/i, "touch base"],
+  [/would you be interested/i, "would you be interested"],
+  [/if this sounds (interesting|good)/i, "if this sounds interesting"],
 ];
 
 const PLACEHOLDER = ["[", "{{", "xxx", "lorem ipsum", "your company", "company name", "firstname"];
@@ -40,14 +50,37 @@ export function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
+/**
+ * Drop a trailing signature block so it is not counted or analysed as prose.
+ *
+ * A signature is trailing short lines with no sentence-ending punctuation ("Ozan\nWearSide
+ * Labs"). Length alone is not enough to identify one: a short final paragraph is very often
+ * the ask itself ("Bu hafta paylaşabilir misiniz?"), and an earlier version of this function
+ * silently discarded exactly that, which then made every good email look like it had no ask.
+ */
+export function stripSignature(body: string): string {
+  const blocks = body.trim().split(/\n\s*\n/);
+  while (blocks.length > 1) {
+    const last = blocks[blocks.length - 1];
+    const lines = last.split("\n").map((l) => l.trim()).filter(Boolean);
+    const looksLikeSignature =
+      lines.length <= 3 &&
+      lines.every((l) => l.length <= 48) &&
+      !/[.?!…]\s*$/.test(last.trim()) &&
+      !/\b(mi|mı|mu|mü)siniz\b/i.test(last);
+    if (!looksLikeSignature) break;
+    blocks.pop();
+  }
+  return blocks.join("\n\n");
+}
+
 export function checkQuality(args: {
   subject: string; body: string; citedClaims: number;
 }): QualityCheck[] {
   const out: QualityCheck[] = [];
   const body = args.body.toLowerCase();
   const subject = args.subject.trim();
-  // Only the message itself - the signature is appended and is not the model's prose.
-  const prose = args.body.split(/\n\n(?=[^\n]{0,60}$)/)[0] ?? args.body;
+  const prose = stripSignature(args.body);
   const words = countWords(prose);
 
   if (args.citedClaims === 0) {
@@ -62,8 +95,8 @@ export function checkQuality(args: {
   for (const phrase of HEDGING) {
     if (body.includes(phrase)) { out.push({ flag: "hedging", detail: `hedged offer: "${phrase}"` }); break; }
   }
-  for (const phrase of VAGUE_ASK) {
-    if (body.includes(phrase)) { out.push({ flag: "vague_ask", detail: `the ask is not answerable: "${phrase}"` }); break; }
+  for (const [re, label] of VAGUE_ASK) {
+    if (re.test(args.body)) { out.push({ flag: "vague_ask", detail: `the ask is not answerable: "${label}"` }); break; }
   }
   for (const phrase of PLACEHOLDER) {
     if (body.includes(phrase)) { out.push({ flag: "placeholder", detail: `unfilled placeholder: "${phrase}"` }); break; }
