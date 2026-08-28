@@ -142,3 +142,61 @@ t2("a page stored without links reads back as an empty list, not a crash", async
     contentType: "text/html", html: "", bytes: 1, ok: true } as never, "t", "T");
   assert.deepEqual(getCachedPage(db, "https://y.com/")!.links, []);
 });
+
+/* Cloudflare obfuscation, JSON-LD, and vendor addresses. */
+import { decodeCfEmail, emailOwnership, extractPage as xp } from "../../src/server/research/extract.ts";
+
+t2("Cloudflare-obfuscated addresses are decoded", () => {
+  // Real hex captured from sporankara.org/kunye.
+  assert.equal(decodeCfEmail("9afeffe9eefff1daf2fbf8ffe8e3fbe0f3f6f3f7f3b4f9f5f7"), "destek@haberyazilimi.com");
+});
+
+t2("a malformed cfemail hex is rejected rather than decoded to noise", () => {
+  for (const bad of ["", "zz", "abc", "9afeffe9eefff1daf"]) assert.equal(decodeCfEmail(bad), undefined);
+});
+
+t2("both Cloudflare markup forms are picked up from a page", () => {
+  const hex = "9afeffe9eefff1daf2fbf8ffe8e3fbe0f3f6f3f7f3b4f9f5f7";
+  const html = `<html><body>
+    <span class="__cf_email__" data-cfemail="${hex}">[email&#160;protected]</span>
+    <a href="/cdn-cgi/l/email-protection#${hex}">write to us</a>
+  </body></html>`;
+  const p = xp(html, "https://x.com/kunye");
+  assert.deepEqual(p.emails, ["destek@haberyazilimi.com"], "both forms decode to the same address");
+});
+
+t2("an address published only in JSON-LD is found", () => {
+  const html = `<html><head><script type="application/ld+json">
+    {"@type":"NewsMediaOrganization","name":"X","email":"bilgi@x.com.tr"}
+  </script></head><body>no visible address here</body></html>`;
+  assert.deepEqual(xp(html, "https://x.com.tr/").emails, ["bilgi@x.com.tr"]);
+});
+
+t2("a contact form is detected, so 'no address' can say why", () => {
+  const withForm = `<html><body><form><input type="email" name="email"><button>Send</button></form></body></html>`;
+  const without = `<html><body><form><input type="text" name="q"></form></body></html>`;
+  assert.equal(xp(withForm, "https://x.com/iletisim").hasContactForm, true);
+  assert.equal(xp(without, "https://x.com/ara").hasContactForm, false);
+});
+
+t2("a web provider's address is classified as third-party, not the company's", () => {
+  assert.equal(emailOwnership("bilgi@manisaaktifhaber.com.tr", "manisaaktifhaber.com.tr"), "own-domain");
+  assert.equal(emailOwnership("info@news.manisaaktifhaber.com.tr", "manisaaktifhaber.com.tr"), "own-domain");
+  assert.equal(emailOwnership("sporankara@outlook.com", "sporankara.org"), "freemail");
+  assert.equal(emailOwnership("destek@haberyazilimi.com", "sporankara.org"), "third-party",
+    "emailing the CMS vendor instead of the newsroom is worse than sending nothing");
+});
+
+t2("a Cloudflare address survives a cache round-trip", async () => {
+  const { openDb } = await import("../../src/server/db/index.ts");
+  const { migrate } = await import("../../src/server/db/migrate.ts");
+  const { storePage, getCachedPage } = await import("../../src/server/research/fetcher.ts");
+  const db = openDb(":memory:"); migrate(db);
+  // The address is in an HTML attribute and appears nowhere in the visible text.
+  storePage(db, { url: "https://x.com/kunye", finalUrl: "https://x.com/kunye", status: 200,
+    contentType: "text/html", html: "", bytes: 1, ok: true } as never,
+    "Künye. Yayın sahibi. [email protected]", "Künye", undefined, [], ["bilgi@x.com"], true);
+  const c = getCachedPage(db, "https://x.com/kunye")!;
+  assert.deepEqual(c.emails, ["bilgi@x.com"], "re-deriving from text alone would lose it");
+  assert.equal(c.hasForm, true);
+});

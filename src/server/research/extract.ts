@@ -64,6 +64,28 @@ export interface ExtractedPage {
   links: string[];
   emails: string[];
   phones: string[];
+  /** True when the page offers a contact form. Distinguishes "won't say" from "nothing here". */
+  hasContactForm: boolean;
+}
+
+/**
+ * Decode a Cloudflare-obfuscated email.
+ *
+ * Cloudflare's "Email Address Obfuscation" replaces addresses with a hex string in
+ * `data-cfemail` (or the fragment of a /cdn-cgi/l/email-protection link) and decodes it with
+ * JavaScript in the browser. The encoding is a single-byte XOR: the first byte is the key.
+ *
+ * This is not an edge case. Of six Turkish news sites tested, three published their address
+ * this way and every one of them was reported as having no contact at all.
+ */
+export function decodeCfEmail(hex: string): string | undefined {
+  if (!/^[0-9a-f]{6,}$/i.test(hex) || hex.length % 2 !== 0) return undefined;
+  const key = parseInt(hex.slice(0, 2), 16);
+  let out = "";
+  for (let i = 2; i < hex.length; i += 2) {
+    out += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16) ^ key);
+  }
+  return out;
 }
 
 export function htmlToText(html: string): { title: string; text: string } {
@@ -106,13 +128,44 @@ export function extractPage(html: string, pageUrl: string): ExtractedPage {
     const c = cleanEmail(m); if (c) emails.add(c);
   }
 
+  // Cloudflare obfuscation, in both the forms it ships in.
+  $("[data-cfemail]").each((_, el) => {
+    const decoded = decodeCfEmail($(el).attr("data-cfemail") ?? "");
+    const c = decoded ? cleanEmail(decoded) : undefined;
+    if (c) emails.add(c);
+  });
+  $('a[href*="/cdn-cgi/l/email-protection#"]').each((_, el) => {
+    const hex = ($(el).attr("href") ?? "").split("#")[1] ?? "";
+    const decoded = decodeCfEmail(hex);
+    const c = decoded ? cleanEmail(decoded) : undefined;
+    if (c) emails.add(c);
+  });
+
+  // JSON-LD. News sites and local businesses very often carry the address here and nowhere
+  // else a human would see.
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).text();
+    if (!raw || raw.length > 200_000) return;
+    for (const m of raw.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? []) {
+      const c = cleanEmail(m);
+      if (c) emails.add(c);
+    }
+  });
+
   const phones = new Set<string>();
   $('a[href^="tel:" i]').each((_, el) => {
     const t = ($(el).attr("href") ?? "").replace(/^tel:/i, "").trim();
     if (t) phones.add(t);
   });
 
-  return { title, text, links: [...links], emails: [...emails], phones: [...phones] };
+  // A form means they can be contacted, just not by us automatically - worth telling the user
+  // rather than reporting the same "nothing found" as a dead site.
+  const hasContactForm = $("form").toArray().some((el) => {
+    const html = $.html(el).toLowerCase();
+    return /type=["']?email|name=["']?(email|e-?posta|mail)/.test(html);
+  });
+
+  return { title, text, links: [...links], emails: [...emails], phones: [...phones], hasContactForm };
 }
 
 export function cleanEmail(raw: string): string | undefined {
@@ -128,6 +181,28 @@ export function cleanEmail(raw: string): string | undefined {
 
 export function isRoleAccount(email: string): boolean {
   return ROLE_LOCALPARTS.has(email.split("@")[0].toLowerCase());
+}
+
+/** Free mailbox providers - a legitimate address for a small business, but not proof of domain. */
+const FREEMAIL = new Set([
+  "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
+  "yandex.com", "yandex.com.tr", "icloud.com", "protonmail.com", "proton.me", "mail.ru", "gmx.com",
+]);
+
+/**
+ * Is this address plausibly the company's own?
+ *
+ * Pages routinely carry a CMS vendor's or web agency's support address in the footer -
+ * sporankara.org publishes destek@haberyazilimi.com next to its own address. Emailing the
+ * vendor instead of the company is worse than sending nothing, so an off-domain, non-freemail
+ * address is demoted rather than treated as the contact.
+ */
+export function emailOwnership(email: string, companyDomain: string): "own-domain" | "freemail" | "third-party" {
+  const host = (email.split("@")[1] ?? "").toLowerCase();
+  const base = companyDomain.toLowerCase().replace(/^www\./, "");
+  if (host === base || host.endsWith(`.${base}`) || base.endsWith(`.${host}`)) return "own-domain";
+  if (FREEMAIL.has(host)) return "freemail";
+  return "third-party";
 }
 
 /**

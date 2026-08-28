@@ -9,7 +9,7 @@ import type { LlmService } from "../llm/index.ts";
 import { ulid, now, tx, type Db } from "../db/index.ts";
 import { Fetcher, domainOf, getCachedPage, normalizeUrl, storePage } from "./fetcher.ts";
 import { extractPage, htmlToText, isRoleAccount, pickContactPages, quoteAppearsIn, cleanEmail,
-         inferEmailPattern, applyEmailPattern } from "./extract.ts";
+         inferEmailPattern, applyEmailPattern, emailOwnership } from "./extract.ts";
 import * as P from "../llm/prompts.ts";
 
 export interface PipelineDeps { db: Db; llm: LlmService; fetcher: Fetcher }
@@ -177,7 +177,7 @@ Report only organisations that are genuinely the KIND of thing the target descri
 
 /* --------------------------------------------------------------- enrichment */
 
-export interface CrawledPage { id: string; url: string; title: string; text: string; emails: string[] }
+export interface CrawledPage { id: string; url: string; title: string; text: string; emails: string[]; hasContactForm?: boolean }
 
 /** Homepage plus a bounded set of contact-ish pages. Cached, so re-runs are cheap and polite. */
 export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPages = 7): Promise<CrawledPage[]> {
@@ -189,9 +189,15 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
   const visit = async (url: string): Promise<{ page?: CrawledPage; links: string[] }> => {
     const cached = getCachedPage(db, url);
     if (cached) {
-      const emails = [...new Set((cached.text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? [])
+      // Prefer the addresses recorded at fetch time: a Cloudflare-obfuscated or JSON-LD address
+      // never appears in the stored text, so re-deriving from text alone would lose it.
+      const fromText = [...new Set((cached.text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? [])
         .map(cleanEmail).filter((e): e is string => !!e))];
-      return { page: { id: cached.id, url: cached.url, title: cached.title, text: cached.text, emails }, links: cached.links };
+      const emails = [...new Set([...cached.emails, ...fromText])];
+      return {
+        page: { id: cached.id, url: cached.url, title: cached.title, text: cached.text, emails, hasContactForm: cached.hasForm },
+        links: cached.links,
+      };
     }
     const res = await fetcher.fetch(url);
     if (!res.ok || !res.html) {
@@ -201,8 +207,9 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
     const ex = extractPage(res.html, res.finalUrl);
     // Store the contact-page candidates, not every link: that is all a later crawl needs, and
     // a news homepage has hundreds of article links that would bloat the row for nothing.
-    const id = storePage(db, res, ex.text, ex.title, companyId, pickContactPages(ex.links, res.finalUrl, 12));
-    return { page: { id, url: res.finalUrl, title: ex.title, text: ex.text, emails: ex.emails }, links: ex.links };
+    const id = storePage(db, res, ex.text, ex.title, companyId,
+      pickContactPages(ex.links, res.finalUrl, 12), ex.emails, ex.hasContactForm);
+    return { page: { id, url: res.finalUrl, title: ex.title, text: ex.text, emails: ex.emails, hasContactForm: ex.hasContactForm }, links: ex.links };
   };
 
   const first = await visit(home);
@@ -341,8 +348,17 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
   const pages = await crawlCompany(deps, company.id);
   if (pages.length === 0) return { added: 0, considered: 0, notes: ["site unreachable"] };
 
-  const crawlerEmails = [...new Set(pages.flatMap((p) => p.emails))];
+  const RANK = { "own-domain": 0, freemail: 1, "third-party": 2 } as const;
+  const allCrawlerEmails = [...new Set(pages.flatMap((p) => p.emails))];
+  const owned = allCrawlerEmails.filter((e) => emailOwnership(e, company.domain) !== "third-party");
+  // A third-party address is usually the CMS vendor or web agency in the footer. Emailing them
+  // instead of the company is worse than sending nothing, so they are only ever a last resort.
+  const crawlerEmails = (owned.length > 0 ? owned : allCrawlerEmails)
+    .sort((a, b) => RANK[emailOwnership(a, company.domain)] - RANK[emailOwnership(b, company.domain)]);
   const notes: string[] = [];
+  for (const e of allCrawlerEmails.filter((e) => !crawlerEmails.includes(e))) {
+    notes.push(`ignored ${e} - it belongs to a different domain, most likely their web provider`);
+  }
 
   const r = await llm.run<{ contacts: Array<{ full_name?: string | null; title?: string | null; email: string | null; source_url: string; source_snippet?: string; rank: number; why: string }> }>({
     task: "contact.extract",
@@ -412,7 +428,11 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
       }
 
       const page = pageByUrl.get(normalizeUrl(c.source_url)) ?? pages[0];
-      const confidence = sourceKind === "published" ? 0.9 : sourceKind === "generic" ? 0.7 : 0.4;
+      const ownership = emailOwnership(email, company.domain);
+      const base = sourceKind === "published" ? 0.9 : sourceKind === "generic" ? 0.7 : 0.4;
+      const confidence = ownership === "own-domain" ? base
+        : ownership === "freemail" ? base - 0.1
+        : Math.min(base, 0.3);   // a third-party address is a guess about who to talk to
       const dup = db.prepare("SELECT id FROM contact WHERE company_id=? AND lower(email)=lower(?)").get(company.id, email);
       if (dup) { added++; continue; }
 
@@ -428,8 +448,13 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
     db.prepare("UPDATE campaign_company SET status=?, updated_at=? WHERE id=?")
       .run(added > 0 ? "contacts_found" : "failed", now(), campaignCompanyId);
     if (added === 0) {
-      db.prepare("UPDATE campaign_company SET error_code='NO_CONTACTS', error_message=? WHERE id=?")
-        .run("no publishable address found on the site", campaignCompanyId);
+      const form = pages.some((p) => p.hasContactForm);
+      db.prepare("UPDATE campaign_company SET error_code=?, error_message=? WHERE id=?")
+        .run(form ? "CONTACT_FORM_ONLY" : "NO_CONTACTS",
+             form
+               ? "no address published - they take enquiries through a form on their site"
+               : "no publishable address found on the site",
+             campaignCompanyId);
     }
   });
 
