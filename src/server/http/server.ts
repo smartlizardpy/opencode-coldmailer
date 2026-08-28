@@ -73,7 +73,9 @@ export class EventBus {
     });
     res.write(": connected\n\n");
     this.clients.add(res);
+    // unref: a keepalive ping should never be the only thing keeping the process alive.
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, 25_000);
+    ping.unref?.();
     res.on("close", () => { clearInterval(ping); this.clients.delete(res); });
   }
 
@@ -113,7 +115,10 @@ export function createApp(app: AppContext): Server {
           // applies heuristic caching to plain GETs and will happily show yesterday's data.
           "cache-control": "no-store",
         });
-        return res.end(JSON.stringify(out ?? { ok: true }));
+        // `undefined` means the handler returned nothing, so acknowledge it. `null` is a real
+        // answer - "there is no product yet" - and turning it into {ok:true} made the UI
+        // believe a product existed on a completely fresh install.
+        return res.end(JSON.stringify(out === undefined ? { ok: true } : out));
       } catch (e) {
         const err = e as any;
         app.log(`API ${path} failed: ${err?.message}`);

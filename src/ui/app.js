@@ -1504,6 +1504,14 @@ async function boot() {
   if (!S.campaign && S.campaigns.length) S.campaign = S.campaigns[0].id;
   go(TITLES[hashRoute] ? hashRoute : "dashboard");
 
+  // Without this, the browser back button and any direct #hash link silently do nothing:
+  // the URL changes and the page keeps rendering whatever it was already showing.
+  addEventListener("hashchange", () => {
+    const [route, campaign] = location.hash.replace(/^#/, "").split("/");
+    if (campaign && campaign !== S.campaign) S.campaign = campaign;
+    if (TITLES[route] && route !== S.route) go(route);
+  });
+
   setInterval(loadHealth, 6000);
 }
 
