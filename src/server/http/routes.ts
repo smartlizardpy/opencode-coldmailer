@@ -449,9 +449,24 @@ export function registerRoutes(r: Router, app: AppContext): void {
   /** The whole pipeline for the selected companies, sequentially, with live progress. */
   r.post("/api/campaigns/:id/run", ({ params }: RouteCtx) =>
     background(app, `run:${params.id}`, "Researching and drafting", async () => {
-      const rows = db.prepare("SELECT id FROM campaign_company WHERE campaign_id=? AND selected=1 ORDER BY relevance_score DESC NULLS LAST")
-        .all(params.id) as Array<{ id: string }>;
-      if (rows.length === 0) throw bad("tick at least one company first");
+      // Re-running after adding more companies should not redo the ones already finished:
+      // that is minutes of model time and another crawl of a site we have already been polite
+      // to. `redo` forces everything, for when the brief or the target has changed.
+      const redo = body.redo === true;
+      const rows = db.prepare(
+        `SELECT id FROM campaign_company
+         WHERE campaign_id=? AND selected=1 AND status != 'rejected'
+         ${redo ? "" : "AND status NOT IN ('drafted','approved','sent','replied')"}
+         ORDER BY relevance_score DESC NULLS LAST`,
+      ).all(params.id) as Array<{ id: string }>;
+      if (rows.length === 0) {
+        const done = (db.prepare(
+          "SELECT COUNT(*) n FROM campaign_company WHERE campaign_id=? AND selected=1 AND status IN ('drafted','approved','sent','replied')",
+        ).get(params.id) as { n: number }).n;
+        throw bad(done > 0
+          ? `all ${done} ticked companies are already done — tick some new ones, or use Redo to run them again`
+          : "tick at least one company first");
+      }
       const summary = { companies: rows.length, enriched: 0, contacts: 0, drafts: 0, failures: [] as string[] };
 
       db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), params.id);

@@ -164,7 +164,7 @@ function paletteCommands() {
     cmds.push({ label: `Open campaign: ${c.name}`, icon: "binocular", hint: `${c.companies} companies`,
       run: () => { S.campaign = c.id; go("campaigns"); } });
   }
-  for (const co of S.companies.slice(0, 40)) {
+  for (const co of S.companies.slice(0, 200)) {
     cmds.push({ label: co.name, icon: "building", hint: co.domain,
       run: () => { go("campaigns"); setTimeout(() => showCompany(co.id), 80); } });
   }
@@ -172,7 +172,15 @@ function paletteCommands() {
 }
 
 let paletteState = null;
-function openPalette() {
+async function openPalette() {
+  // The palette offers to search companies, so it has to have them - they are otherwise only
+  // loaded by the Campaigns screen, and searching from anywhere else found nothing.
+  if (!S.companies.length && S.campaign) {
+    try { S.companies = await api(`/api/campaigns/${S.campaign}/companies`); } catch { /* search fewer things */ }
+  }
+  if (!S.campaigns.length) {
+    try { S.campaigns = await api("/api/campaigns"); } catch { /* search fewer things */ }
+  }
   const cmds = paletteCommands();
   paletteState = { cmds, filtered: cmds, index: 0 };
   $("#modal").innerHTML = `
@@ -502,6 +510,8 @@ async function renderCampaigns() {
           <button class="btn ghost sm" id="btnTickAll">Tick all</button>
           <button class="btn ghost sm" id="btnTickNone">Untick all</button>
           <button class="btn" id="btnRun" ${ticked ? "" : "disabled"}>${icon("play")} Research &amp; write</button>
+          ${rows.some((r) => ["drafted", "approved", "sent", "replied"].includes(r.status))
+            ? `<button class="btn ghost sm" id="btnRedo" title="Run every ticked company again, including finished ones">${icon("refresh")} Redo</button>` : ""}
         </span>
       </div>
       <div class="row" style="margin-bottom:var(--s4)">
@@ -558,6 +568,10 @@ async function renderCampaigns() {
   $("#btnRun").onclick = async () => {
     try { await api(`/api/campaigns/${camp.id}/run`, {}); toast("Researching…"); } catch (e) { fail(e); }
   };
+  $("#btnRedo")?.addEventListener("click", async () => {
+    if (!confirm("Run every ticked company again, including the ones already done?\n\nThis re-crawls their sites and rewrites their emails.")) return;
+    try { await api(`/api/campaigns/${camp.id}/run`, { redo: true }); toast("Re-running everything…"); } catch (e) { fail(e); }
+  });
   const setAll = async (v) => {
     await api(`/api/campaigns/${camp.id}/select-all`, { selected: v });
     renderCampaigns();

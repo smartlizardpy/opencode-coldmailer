@@ -11,7 +11,7 @@ import { spawn } from "node:child_process";
 import { openDb } from "./db/index.ts";
 import { integrityReport, migrate, recoverAfterCrash, repairOrphans, schemaVersion } from "./db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "./db/settings.ts";
-import { backfillQuality } from "./research/quality.ts";
+import { backfillQuality, QUALITY_VERSION } from "./research/quality.ts";
 import { OpencodeSupervisor, locateOpencode } from "./opencode/supervisor.ts";
 import { LlmService } from "./llm/index.ts";
 import { probeModels, type ModelSlots } from "./opencode/models.ts";
@@ -135,8 +135,12 @@ export async function main(argv: string[] = []): Promise<void> {
   const applied = migrate(db);
   if (applied.length) log(`applied migrations: ${applied.join(", ")} (schema v${schemaVersion(db)})`);
   seedDefaults(db);
-  const backfilled = backfillQuality(db as never);
-  if (backfilled) log(`backfilled quality checks on ${backfilled} existing draft version(s)`);
+  // Re-check every draft when the rules themselves change, so nobody is shown a flag written
+  // by a version of the checker that no longer exists.
+  const storedQuality = getSetting<number>(db, "quality_version", 0);
+  const backfilled = backfillQuality(db as never, storedQuality < QUALITY_VERSION);
+  if (backfilled) log(`re-checked quality on ${backfilled} draft version(s)`);
+  if (storedQuality < QUALITY_VERSION) setSetting(db, "quality_version", QUALITY_VERSION);
 
   const integrity = integrityReport(db);
   if (!integrity.ok) {

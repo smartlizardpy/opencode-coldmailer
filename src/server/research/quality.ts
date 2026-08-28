@@ -129,12 +129,21 @@ export function isBlocking(flags: QualityFlag[]): boolean {
  * duplicating them as SQL expressions would let the two drift, and then a draft would show
  * different flags depending on when it was written.
  */
+/**
+ * Bumped whenever the checks or their wording change, so existing drafts are re-checked once
+ * instead of showing flags produced by an older version of the rules.
+ */
+export const QUALITY_VERSION = 2;
+
 export function backfillQuality(db: {
-  prepare: (sql: string) => { all: (...a: unknown[]) => unknown[]; run: (...a: unknown[]) => unknown };
-}): number {
+  prepare: (sql: string) => { all: (...a: unknown[]) => unknown[]; run: (...a: unknown[]) => unknown; get?: (...a: unknown[]) => unknown };
+}, force = false): number {
   const rows = db.prepare(
-    `SELECT v.id, v.subject, v.body_text, v.personalization
-     FROM email_draft_version v WHERE v.word_count = 0 AND length(v.body_text) > 0`,
+    force
+      ? `SELECT v.id, v.subject, v.body_text, v.personalization
+         FROM email_draft_version v WHERE length(v.body_text) > 0`
+      : `SELECT v.id, v.subject, v.body_text, v.personalization
+         FROM email_draft_version v WHERE v.word_count = 0 AND length(v.body_text) > 0`,
   ).all() as Array<{ id: string; subject: string; body_text: string; personalization: string }>;
 
   let done = 0;
