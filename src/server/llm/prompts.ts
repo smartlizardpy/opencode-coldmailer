@@ -209,7 +209,10 @@ Rules:
 - Only list people or inboxes that actually appear in the page text. Never invent a name or an address.
 - "email" must be an address that literally appears in the text. If you know a person's name but not their address, still list them with email set to null - do not construct one.
 - Rank by who would actually decide on THIS specific ask, not by seniority in general. For a small firm the owner is usually right; for a larger one it is the person who owns that function.
-- Prefer a named person over a generic inbox, but list the generic inbox too if that is all there is.`;
+- Prefer a named person over a generic inbox, but list the generic inbox too if that is all there is.
+- If the crawler has already extracted addresses from these pages, EVERY one of them must appear
+  in your answer. They were read from the page text directly, so "I could not find an address" is
+  not an available answer when the list below is non-empty. Rank them, do not drop them.`;
 
 export const CONTACTS_SCHEMA = {
   type: "object", additionalProperties: false, required: ["contacts"],

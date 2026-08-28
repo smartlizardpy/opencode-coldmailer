@@ -39,6 +39,24 @@ export function suppress(db: Db, pattern: string, reason: string, note?: string)
     .run(ulid(), p, p.startsWith("@") ? "domain" : "email", reason, note ?? null, now());
 }
 
+/**
+ * Has this person already been emailed from a DIFFERENT campaign?
+ *
+ * Campaigns are built independently, so the same address can easily end up in two of them.
+ * Receiving two unrelated cold emails from the same sender is the fastest way to be marked as
+ * spam by a human, and nothing else in the system would catch it: suppression only covers
+ * people who asked to stop, and the per-campaign unique index only covers one campaign.
+ */
+export function contactedElsewhere(db: Db, contactId: string, campaignId: string):
+  { contacted: boolean; campaignName?: string; sentAt?: number } {
+  const row = db.prepare(
+    `SELECT s.sent_at, c.name FROM send_log s JOIN campaign c ON c.id = s.campaign_id
+     WHERE s.contact_id = ? AND s.campaign_id != ? AND s.status = 'sent'
+     ORDER BY s.sent_at DESC LIMIT 1`,
+  ).get(contactId, campaignId) as { sent_at: number; name: string } | undefined;
+  return row ? { contacted: true, campaignName: row.name, sentAt: row.sent_at } : { contacted: false };
+}
+
 export function approveDraft(db: Db, draftId: string): void {
   db.prepare("UPDATE email_draft SET status='approved', approved_at=?, updated_at=? WHERE id=? AND status IN ('draft','needs_review')")
     .run(now(), now(), draftId);
@@ -65,6 +83,13 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
     db.prepare("UPDATE email_draft SET status='discarded', error_code='SUPPRESSED', error_message=?, updated_at=? WHERE id=?")
       .run(sup.reason ?? "suppressed", now(), draftId);
     return { sent: false, reason: `suppressed: ${sup.reason}`, code: "SUPPRESSED" };
+  }
+
+  const dupe = contactedElsewhere(db, d.contact_id, d.campaign_id);
+  if (dupe.contacted) {
+    db.prepare("UPDATE email_draft SET status='discarded', error_code='ALREADY_CONTACTED', error_message=?, updated_at=? WHERE id=?")
+      .run(`already emailed from "${dupe.campaignName}"`, now(), draftId);
+    return { sent: false, reason: `already emailed from "${dupe.campaignName}" - not sending a second cold email`, code: "ALREADY_CONTACTED" };
   }
 
   const g = sendGuards(db, d.campaign_id);

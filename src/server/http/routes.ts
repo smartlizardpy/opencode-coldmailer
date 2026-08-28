@@ -8,7 +8,7 @@ import { probeModels } from "../opencode/models.ts";
 import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/secrets.ts";
 import { verifySmtp, GMAIL_PRESET } from "../mail/smtp.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
-import { approveDraft, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
+import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, briefOf } from "../research/pipeline.ts";
 import { composeDraft, saveHumanEdit } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
@@ -376,6 +376,9 @@ export function registerRoutes(r: Router, app: AppContext): void {
     ).get(d.campaign_company_id) as { name: string } | undefined;
     return {
       ...d, claims, company: company?.name ?? "",
+      // Shown as a warning in review, so it is seen before approving rather than as a
+      // silent refusal at send time.
+      alreadyContacted: contactedElsewhere(db, d.contact_id, d.campaign_id),
       versions: db.prepare("SELECT version,subject,author,edit_note,created_at FROM email_draft_version WHERE draft_id=? ORDER BY version DESC").all(params.id),
       contact: db.prepare("SELECT * FROM contact WHERE id=?").get(d.contact_id),
     };

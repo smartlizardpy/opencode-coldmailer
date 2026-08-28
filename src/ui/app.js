@@ -665,6 +665,10 @@ async function drawLetter() {
         ${full.contact.full_name ? `<div class="cellsub">${esc(full.contact.full_name)}${full.contact.title ? ` · ${esc(full.contact.title)}` : ""}</div>` : ""}
       </div>
       <div class="letter-body">
+        ${full.alreadyContacted?.contacted ? `<div class="flagbox" style="background:var(--bad-bg);border-color:var(--bad);color:var(--bad)">
+          ${icon("warning-triangle")} <b>This person was already emailed from “${esc(full.alreadyContacted.campaignName)}”</b>
+          <div>Sending a second unrelated cold email is the fastest way to get marked as spam.
+          This draft will be refused at send time.</div></div>` : ""}
         ${flags.length ? `<div class="flagbox">${icon("warning-triangle")} <b>Worth a look before you approve</b>
           <ul>${flags.map((f) => `<li>${esc(FLAG_TEXT[f.flag] ?? f.flag)} — <span style="opacity:.85">${esc(f.detail)}</span></li>`).join("")}</ul>
         </div>` : ""}

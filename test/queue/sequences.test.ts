@@ -140,3 +140,61 @@ test("setSteps refuses to create a step 1 - that is the initial email", () => {
                        { step_number: 2, delay_days: 3, instruction: "ok" }]);
   assert.deepEqual(listSteps(db, ids.c).map((s) => s.step_number), [2]);
 });
+
+/* Cross-campaign duplicate protection. */
+import { contactedElsewhere, sendOne } from "../../src/server/queue/sendQueue.ts";
+
+test("a contact already emailed from another campaign is detected", () => {
+  const { db, ids } = world();
+  const other = ulid();
+  db.prepare("INSERT INTO campaign (id,product_id,name,created_at,updated_at) VALUES (?,?,?,?,?)")
+    .run(other, ids.p, "Other campaign", now(), now());
+  assert.equal(contactedElsewhere(db, ids.ct, ids.c).contacted, false);
+
+  // a send from the OTHER campaign to the same person
+  const d = ulid(), v = ulid();
+  db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,step_number,created_at,updated_at) VALUES (?,?,?,?,'sent',1,?,?)")
+    .run(d, other, ids.cc, ids.ct, now(), now());
+  db.prepare("INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,created_at) VALUES (?,?,?,?,?,'llm',?)")
+    .run(v, d, 1, "s", "b", now());
+  db.prepare("INSERT INTO send_log (id,draft_id,version_id,campaign_id,contact_id,to_email,from_email,subject,message_id,status,sent_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,'sent',?,?)")
+    .run(ulid(), d, v, other, ids.ct, "a@x.com", "m@m.com", "s", "<o@cc>", Date.now(), now());
+
+  const r = contactedElsewhere(db, ids.ct, ids.c);
+  assert.equal(r.contacted, true);
+  assert.equal(r.campaignName, "Other campaign");
+});
+
+test("a send within the SAME campaign is not treated as a cross-campaign duplicate", () => {
+  const { db, ids } = world();
+  sent(db, ids, 1, 5);
+  assert.equal(contactedElsewhere(db, ids.ct, ids.c).contacted, false,
+    "follow-ups in the same campaign are the point, not a duplicate");
+});
+
+test("sendOne refuses a contact already emailed from another campaign", async () => {
+  const { db, ids } = world();
+  const other = ulid();
+  db.prepare("INSERT INTO campaign (id,product_id,name,created_at,updated_at) VALUES (?,?,?,?,?)")
+    .run(other, ids.p, "Other campaign", now(), now());
+  const d1 = ulid(), v1 = ulid();
+  db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,step_number,created_at,updated_at) VALUES (?,?,?,?,'sent',1,?,?)")
+    .run(d1, other, ids.cc, ids.ct, now(), now());
+  db.prepare("INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,created_at) VALUES (?,?,?,?,?,'llm',?)")
+    .run(v1, d1, 1, "s", "b", now());
+  db.prepare("INSERT INTO send_log (id,draft_id,version_id,campaign_id,contact_id,to_email,from_email,subject,message_id,status,sent_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,'sent',?,?)")
+    .run(ulid(), d1, v1, other, ids.ct, "a@x.com", "m@m.com", "s", "<x@cc>", Date.now(), now());
+
+  const d2 = ulid(), v2 = ulid();
+  db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,step_number,created_at,updated_at) VALUES (?,?,?,?,'approved',1,?,?)")
+    .run(d2, ids.c, ids.cc, ids.ct, now(), now());
+  db.prepare("INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,created_at) VALUES (?,?,?,?,?,'llm',?)")
+    .run(v2, d2, 1, "s2", "b2", now());
+
+  const out = await sendOne(db, d2, {
+    host: "localhost", port: 1, secure: false, user: "u", fromEmail: "m@m.com", fromName: "",
+  });
+  assert.equal(out.sent, false);
+  assert.equal((out as { code: string }).code, "ALREADY_CONTACTED",
+    "must refuse BEFORE reaching SMTP");
+});

@@ -353,12 +353,37 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
   const pageByUrl = new Map(pages.map((p) => [normalizeUrl(p.url), p]));
   const allText = pages.map((p) => p.text).join("\n").toLowerCase();
   const wanted = campaign.contacts_per_company ?? 3;
-  const candidates = [...(r.value.contacts ?? [])].sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
+  const candidates = [...(r.value.contacts ?? [])];
 
   // Learn the domain's address pattern from what it actually publishes, for the opt-in tier.
   const pattern = inferEmailPattern(
     candidates.filter((c) => c.email && c.full_name).map((c) => ({ email: c.email!, fullName: c.full_name! })),
   );
+
+  /**
+   * Deterministic fallback.
+   *
+   * The crawler already found these addresses in text we fetched and stored - that is a fact,
+   * not a judgement. Observed live: futbolamator.com publishes verhaber@gmail.com on /kunye/
+   * and the model still returned an empty contact list, so the company was reported as having
+   * no publishable address. Where Node has better information than the model, Node wins.
+   */
+  const modelEmails = new Set(
+    candidates.map((c) => (c.email ? cleanEmail(c.email) : undefined)).filter(Boolean) as string[],
+  );
+  for (const email of crawlerEmails) {
+    if (modelEmails.has(email)) continue;
+    const page = pages.find((p) => p.emails.includes(email)) ?? pages[0];
+    candidates.push({
+      full_name: null, title: null, email,
+      source_url: page.url, source_snippet: "",
+      rank: 90 + candidates.length,   // after anything the model ranked
+      why: "found on the site by the crawler",
+    });
+    notes.push(`added ${email} from ${new URL(page.url).pathname} - the crawler found it but the model did not list it`);
+  }
+
+  candidates.sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
 
   let added = 0;
   tx(db, () => {
