@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickByPreferenceAndSpeed, type ProbedModel } from "../../src/server/opencode/models.ts";
+import { candidatesFor, Cooldowns, pickByPreferenceAndSpeed, type ProbedModel } from "../../src/server/opencode/models.ts";
 
 /* Which of the passing models actually gets used. */
 
@@ -41,4 +41,50 @@ test("a model with no timing is not penalised for it", () => {
 
 test("no candidates means no model, not a crash", () => {
   assert.equal(pickByPreferenceAndSpeed([]), undefined);
+});
+
+/* The order requests are actually tried in. */
+
+const slots = (activeId: string, ids: string[]) => ({
+  research: {
+    active: { providerID: "opencode", modelID: activeId },
+    ranking: ids.map((modelID) => ({ providerID: "opencode", modelID, ok: true, searchProbe: "pass" as const })),
+    status: "ok" as const,
+  },
+  writing: { active: null, ranking: [], status: "none" as const },
+});
+
+test("the active model is tried first, even when it is not first in the ranking", () => {
+  // The active model was only prepended when it was ABSENT from the ranking - so in the
+  // normal case, where it is present, the order fell back to raw preference and the first
+  // request went to a different model than the one the slot named.
+  const c = candidatesFor(slots("big-pickle", ["nemotron", "big-pickle", "hy3"]) as never, "research", new Cooldowns(), 2);
+  assert.deepEqual(c.map((m) => m.modelID), ["big-pickle", "nemotron"]);
+});
+
+test("the rest of the ranking follows as failover, without duplicating the active one", () => {
+  const c = candidatesFor(slots("hy3", ["nemotron", "big-pickle", "hy3"]) as never, "research", new Cooldowns(), 4);
+  assert.deepEqual(c.map((m) => m.modelID), ["hy3", "nemotron", "big-pickle"]);
+});
+
+test("a cooled-down model is skipped, active or not", () => {
+  const cd = new Cooldowns();
+  cd.add({ providerID: "opencode", modelID: "big-pickle" }, 60_000, "429");
+  const c = candidatesFor(slots("big-pickle", ["nemotron", "big-pickle", "hy3"]) as never, "research", cd, 2);
+  assert.deepEqual(c.map((m) => m.modelID), ["nemotron", "hy3"]);
+});
+
+test("research candidates never include a model that failed the search probe", () => {
+  const s = {
+    research: {
+      active: { providerID: "opencode", modelID: "big-pickle" },
+      ranking: [
+        { providerID: "opencode", modelID: "big-pickle", ok: true, searchProbe: "pass" as const },
+        { providerID: "opencode", modelID: "no-search", ok: true, searchProbe: "fail" as const },
+      ],
+      status: "ok" as const,
+    },
+    writing: { active: null, ranking: [], status: "none" as const },
+  };
+  assert.deepEqual(candidatesFor(s as never, "research", new Cooldowns(), 4).map((m) => m.modelID), ["big-pickle"]);
 });

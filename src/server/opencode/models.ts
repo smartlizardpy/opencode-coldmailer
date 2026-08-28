@@ -244,13 +244,24 @@ export class Cooldowns {
   clear(): void { this.map.clear(); }
 }
 
-/** Ordered candidates for a slot, skipping cooled-down models. */
+/**
+ * Ordered candidates for a slot, skipping cooled-down models.
+ *
+ * The active model always goes first. It used to be prepended only when it was ABSENT from
+ * the ranking, so whenever the chosen model was in the list - which is the normal case - the
+ * order fell back to raw preference and the first call went somewhere else entirely. That
+ * silently undid the whole point of choosing an active model: the slot said big-pickle and
+ * every request went to nemotron.
+ */
 export function candidatesFor(slots: ModelSlots, slot: Slot, cooldowns: Cooldowns, limit = 2): ModelRef[] {
   const ranking = slots[slot].ranking.filter((m) => m.ok && (slot !== "research" || m.searchProbe === "pass"));
-  const refs = ranking.map((m) => ({ providerID: m.providerID, modelID: m.modelID }));
   const active = slots[slot].active;
-  if (active && !refs.some((r) => r.providerID === active.providerID && r.modelID === active.modelID)) {
-    refs.unshift(active);
+  const same = (a: ModelRef, b: ModelRef) => a.providerID === b.providerID && a.modelID === b.modelID;
+
+  const refs: ModelRef[] = active ? [active] : [];
+  for (const m of ranking) {
+    const ref = { providerID: m.providerID, modelID: m.modelID };
+    if (!refs.some((r) => same(r, ref))) refs.push(ref);
   }
   return refs.filter((m) => !cooldowns.isCool(m)).slice(0, limit);
 }
