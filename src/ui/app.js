@@ -477,9 +477,16 @@ async function renderCampaigns() {
         <button class="btn" id="btnDiscover">${icon("search")} Search the web</button>
       </div>
       <details>
-        <summary>Or paste a list of domains</summary>
-        <textarea id="manualList" rows="4" aria-label="Domains to add, one per line" placeholder="one per line:&#10;bethellandco.co.uk Bethell &amp; Co&#10;pta.com.tr"></textarea>
-        <div class="row"><button class="btn ghost sm" id="btnManual">Add these</button></div>
+        <summary>Or paste a list</summary>
+        <textarea id="manualList" rows="5" aria-label="Companies to add"
+          placeholder="Paste domains, one per line — or a CSV from a spreadsheet.&#10;&#10;bethellandco.co.uk Bethell &amp; Co&#10;pta.com.tr"></textarea>
+        <div class="row">
+          <button class="btn ghost sm" id="btnManual">${icon("plus")} Add these</button>
+          <input type="file" id="csvFile" accept=".csv,.txt" aria-label="Import a CSV file"
+            style="max-width:230px;padding:4px">
+        </div>
+        <p class="card-note">A bare list, "domain Name" lines, or a CSV with a website column — it
+          works out which. Anything that is not a domain is reported, not silently dropped.</p>
       </details>
     </div>
 

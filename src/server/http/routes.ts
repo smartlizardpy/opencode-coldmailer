@@ -10,6 +10,7 @@ import { verifySmtp, GMAIL_PRESET } from "../mail/smtp.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
+import { parseCompanyList } from "../research/importList.ts";
 import { composeDraft, saveHumanEdit } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
 import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
@@ -266,12 +267,17 @@ export function registerRoutes(r: Router, app: AppContext): void {
     }));
 
   r.post("/api/campaigns/:id/manual", ({ params, body }: RouteCtx) => {
-    const entries = String(body.text ?? "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)
-      .map((line) => { const [website, ...name] = line.split(/\s+/); return { website, name: name.join(" ") || undefined }; });
-    if (entries.length === 0) throw bad("paste at least one domain");
-    const out = addManualCompanies(db, params.id, entries);
+    // Accepts a bare list, "domain Name" lines, or a CSV from a spreadsheet or another tool -
+    // asking the user which one it is would be a worse product than working it out.
+    const parsed = parseCompanyList(String(body.text ?? ""));
+    if (parsed.rows.length === 0) {
+      throw bad(parsed.skipped.length
+        ? `nothing usable found. ${parsed.skipped.slice(0, 3).join("; ")}`
+        : "paste at least one domain");
+    }
+    const out = addManualCompanies(db, params.id, parsed.rows);
     app.bus.emit("companies:changed", { campaignId: params.id });
-    return out;
+    return { ...out, format: parsed.format, skipped: [...parsed.skipped, ...out.skipped] };
   });
 
   r.post("/api/campaigns/:id/select-all", ({ params, body }: RouteCtx) => {
