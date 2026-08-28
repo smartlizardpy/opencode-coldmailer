@@ -9,7 +9,7 @@ your machine. Nothing is uploaded anywhere and **no part of this product can gen
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smartlizardpy/opencode-coldcall/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smartlizardpy/opencode-coldmailer/main/install.sh | bash
 ```
 
 Then:

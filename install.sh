@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # coldcall installer - macOS and Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/smartlizardpy/opencode-coldcall/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/smartlizardpy/opencode-coldmailer/main/install.sh | bash
 #
 # Installs to ~/.coldcall, never touches system Node, never asks for sudo.
 set -euo pipefail
 
-REPO="${COLDCALL_REPO:-smartlizardpy/opencode-coldcall}"
+REPO="${COLDCALL_REPO:-smartlizardpy/opencode-coldmailer}"
 REF="${COLDCALL_REF:-main}"
 HOME_DIR="${COLDCALL_HOME:-$HOME/.coldcall}"
 APP_DIR="$HOME_DIR/app"
@@ -100,9 +100,21 @@ fi
 # ------------------------------------------------------------ the app
 say "downloading coldcall"
 TMP2="$(mktemp -d)"
-TARBALL_URL="${COLDCALL_TARBALL_URL:-https://codeload.github.com/$REPO/tar.gz/$REF}"
-curl -fsSL "$TARBALL_URL" -o "$TMP2/app.tar.gz" \
-  || die "could not download coldcall from $TARBALL_URL"
+# Three ways in, in order of preference:
+#   1. an explicit tarball URL (used by the install tests)
+#   2. the gh CLI, which works for a PRIVATE repo using your existing auth
+#   3. a plain public download
+if [ -n "${COLDCALL_TARBALL_URL:-}" ]; then
+  curl -fsSL "$COLDCALL_TARBALL_URL" -o "$TMP2/app.tar.gz" \
+    || die "could not download coldcall from $COLDCALL_TARBALL_URL"
+elif command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+  say "downloading via gh (works for a private repo)"
+  gh api "repos/$REPO/tarball/$REF" > "$TMP2/app.tar.gz" \
+    || die "gh could not download $REPO@$REF - check you have access"
+else
+  curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$REF" -o "$TMP2/app.tar.gz" \
+    || die "could not download $REPO@$REF. If the repo is private, install the GitHub CLI and run: gh auth login"
+fi
 rm -rf "$APP_DIR.partial"; mkdir -p "$APP_DIR.partial"
 tar -xzf "$TMP2/app.tar.gz" -C "$APP_DIR.partial" --strip-components=1
 [ -f "$APP_DIR.partial/bin/coldcall.js" ] || die "the downloaded archive does not look like coldcall"
