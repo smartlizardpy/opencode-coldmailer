@@ -1701,11 +1701,23 @@ function connectEvents() {
     bar.classList.remove("hidden"); $("#jobText").textContent = d.label; prog.classList.add("hidden");
   });
   ev.addEventListener("job:end", () => { bar.classList.add("hidden"); prog.classList.add("hidden"); loadHealth(); });
-  ev.addEventListener("job:error", (e) => { const d = JSON.parse(e.data); toast(`${d.label}: ${d.error}`, true); });
+  ev.addEventListener("job:error", (e) => {
+    const d = JSON.parse(e.data);
+    toast(`${d.label}: ${d.error}`, true);
+    // A toast disappears; the reason a whole stage failed should not. Campaigns is where the
+    // user is standing when discovery dies, so put it there and leave it there.
+    if (S.route === "campaigns") renderCampaigns();
+  });
   ev.addEventListener("job:done", (e) => {
     const { label, result: r = {} } = JSON.parse(e.data);
     if (r.drafts !== undefined) toast(`Done — ${r.enriched} researched, ${r.contacts} contacts, ${r.drafts} drafts`);
-    else if (r.added !== undefined) toast(`${label}: ${r.added} added${r.skipped?.length ? `, ${r.skipped.length} skipped` : ""}`);
+    else if (r.added !== undefined) {
+      toast(r.added === 0
+        // "0 added" alone reads as "your target is wrong". Say which it was.
+        ? `${label}: nothing matched${r.skipped?.length ? ` — ${r.skipped.length} candidate${r.skipped.length === 1 ? "" : "s"} rejected` : ""}`
+        : `${label}: ${r.added} added${r.skipped?.length ? `, ${r.skipped.length} skipped` : ""}`, r.added === 0);
+      if (r.skipped?.length) console.info("[coldcall] discovery skipped:", r.skipped);
+    }
     else if (r.matched !== undefined) toast(`${r.matched} repl${r.matched === 1 ? "y" : "ies"} matched`);
     else toast(`${label} finished`);
     if (["campaigns", "review", "dashboard", "outbox", "replies"].includes(S.route)) render();

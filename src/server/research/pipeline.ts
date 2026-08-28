@@ -85,7 +85,11 @@ export function isPlausibleCompanyDomain(url: string): boolean {
 
 /* ---------------------------------------------------------------- discovery */
 
-export interface DiscoverResult { found: number; added: number; queries: string[]; skipped: string[] }
+export interface DiscoverResult {
+  found: number; added: number; queries: string[]; skipped: string[];
+  /** How many search calls threw rather than returning an empty result. */
+  failedQueries: number;
+}
 
 export async function discoverCompanies(
   deps: PipelineDeps, campaignId: string,
@@ -115,6 +119,7 @@ export async function discoverCompanies(
 
   type Found = { name: string; website_url: string; fit_score: number; reason: string; matched_signal: string; source_url: string; city?: string };
   const found: Found[] = [];
+  let failedQueries = 0;
 
   if (campaign.discovery_mode === "opencode_search") {
     // One research call per query keeps each session small and stops one bad query from
@@ -152,11 +157,24 @@ Report only organisations that are genuinely the KIND of thing the target descri
           found.push({ ...c, discovered_via: query } as Found);
         }
       } catch (e) {
-        skipped.push(`query "${query}" failed: ${(e as Error).message.slice(0, 120)}`);
+        failedQueries++;
+        const err = e as Error & { code?: string };
+        skipped.push(`query "${query}" failed: ${err.code ? `${err.code} - ` : ""}${err.message.slice(0, 120)}`);
       }
       done++;
       progress({ index: done, total: planned.length, stage: `${found.length} found so far`, query });
     }
+  }
+
+  // Finding nothing because every search threw is not the same outcome as finding nothing
+  // because nothing matched, and reporting them identically is how a user concludes their
+  // targeting is wrong when actually opencode had fallen over. Thrown before the write below
+  // so the campaign is not left marked 'ready' by a run that did no work.
+  if (failedQueries > 0 && failedQueries === Math.min(queries.length, 5) && found.length === 0) {
+    throw Object.assign(
+      new Error(`every search failed - ${skipped[0] ?? "no reason recorded"}`),
+      { code: "DISCOVERY_ALL_FAILED", skipped },
+    );
   }
 
   // Dedupe by domain, keeping the highest-scoring sighting.
@@ -185,7 +203,7 @@ Report only organisations that are genuinely the KIND of thing the target descri
     db.prepare("UPDATE campaign SET status='ready', updated_at=? WHERE id=?").run(now(), campaignId);
   });
 
-  return { found: byDomain.size, added, queries, skipped };
+  return { found: byDomain.size, added, queries, skipped, failedQueries };
 }
 
 /* --------------------------------------------------------------- enrichment */
