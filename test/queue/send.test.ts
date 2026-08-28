@@ -8,6 +8,7 @@ import { openDb, ulid, now, type Db } from "../../src/server/db/index.ts";
 import { migrate } from "../../src/server/db/migrate.ts";
 import { getSetting, seedDefaults, setSetting } from "../../src/server/db/settings.ts";
 import { hasReplied, isTransientSmtpError, isSuppressed, sendGuards, sendOne, suppress, approveDraft } from "../../src/server/queue/sendQueue.ts";
+import { renderedBody } from "../../src/server/research/compose.ts";
 
 const SMTP = { host: "127.0.0.1", port: 1, secure: false, user: "u", fromEmail: "me@me.com", fromName: "Me" };
 
@@ -244,4 +245,25 @@ test("the window does not block anything while it is switched off", () => {
   assert.equal(g.windowOpen, true);
   assert.equal(g.windowOpensAt, undefined);
   assert.equal(g.windowLabel, "any time");
+});
+
+test("the rendered email carries the signature, and nothing when there is no name", () => {
+  // The interview asks about your customers, never about you, so a user can finish it and
+  // send everything unsigned. Nothing invents a name - the guard is on the dashboard - but
+  // the renderer must not emit a stray blank block either.
+  const { db } = world();
+  const version = { body_text: "Merhaba,\n\nKisa bir sorum var.", signature_mode: "rendered" };
+
+  assert.equal(renderedBody(db, version, undefined), "Merhaba,\n\nKisa bir sorum var.");
+  assert.equal(renderedBody(db, version, { sender_name: "", sender_title: "", sender_company: "" }),
+    "Merhaba,\n\nKisa bir sorum var.", "empty fields add no trailing whitespace");
+  assert.equal(renderedBody(db, version, { sender_name: "Ozan", sender_company: "Saha Feed" }),
+    "Merhaba,\n\nKisa bir sorum var.\n\nOzan\nSaha Feed");
+});
+
+test("a version written before signatures were rendered is left exactly as it is", () => {
+  // Those rows already contain the signature; re-rendering would print it twice.
+  const { db } = world();
+  const baked = { body_text: "Merhaba,\n\nOzan\nSaha Feed", signature_mode: "baked" };
+  assert.equal(renderedBody(db, baked, { sender_name: "Ozan", sender_company: "Saha Feed" }), baked.body_text);
 });

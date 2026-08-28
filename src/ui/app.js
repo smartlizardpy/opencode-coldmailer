@@ -346,6 +346,7 @@ async function renderDashboard() {
     product: !!S.product || stats.funnel.discovered > 0,
     mailbox: health.smtp.configured,
     model: health.model.writing.status === "ok",
+    signed: !!health.identity?.signed,
     campaign: stats.campaigns > 0,
   };
   const setupLeft = Object.values(setupDone).filter((v) => !v).length;
@@ -361,6 +362,7 @@ async function renderDashboard() {
         ${[["Describe your product", "product", "product", "Tell it what you sell, in your own words"],
            ["Connect your mailbox", "settings", "mailbox", "SMTP + an app password"],
            ["Pick a model", "settings", "model", "Free models work for research"],
+           ["Sign your emails", "product", "signed", "Your name and business, at the bottom of every one"],
            ["Create a campaign", "campaigns", "campaign", "Who to contact, and what to ask"]]
           .map(([label, route, key, hint]) => `
           <div class="cl-item" data-done="${setupDone[key] ? 1 : 0}">
@@ -658,6 +660,7 @@ async function renderReview() {
   S.drafts = S.draftFilter === "all" ? all : all.filter((d) => d.status === S.draftFilter);
   if (S.reviewIndex >= S.drafts.length) S.reviewIndex = 0;
 
+  const unsigned = S.health && !S.health.identity?.signed;
   const counts = { needs_review: 0, approved: 0, sent: 0 };
   for (const d of all) if (counts[d.status] != null) counts[d.status]++;
 
@@ -673,6 +676,13 @@ async function renderReview() {
         <button class="btn ghost sm" id="btnApproveClean">${icon("check")} Approve all unflagged</button>` : ""}
       <span class="tag" style="margin-left:auto">${icon("antenna-signal")} j / k to move · a to approve · ? for all keys</span>
     </div>
+    ${unsigned ? `<div class="flagbox" style="margin-bottom:var(--s5)">
+      ${icon("warning-triangle")} <b>These emails have no name at the bottom</b>
+      <div>An unsigned message reads as automated, which is the one thing all this research is
+      avoiding. Add your name and business on the Product page — it applies to every draft you
+      have not sent yet, including the ones already written.
+      <button class="btn sm ghost" id="btnGoSign" style="margin-left:var(--s2)">Add it</button></div>
+    </div>` : ""}
     ${S.drafts.length ? `<div class="review-layout">
       <div class="queue">
         <div class="queue-head">${icon("list")} ${num(S.drafts.length)} in queue</div>
@@ -697,6 +707,7 @@ async function renderReview() {
   `);
 
   $("#draftFilter").onchange = (e) => { S.draftFilter = e.target.value; S.reviewIndex = 0; renderReview(); };
+  $("#btnGoSign")?.addEventListener("click", () => go("product"));
   $("#btnApproveClean")?.addEventListener("click", approveAllClean);
   $$("#queueList .qitem").forEach((b) => b.onclick = () => selectDraft(+b.dataset.i));
   if (S.drafts.length) drawLetter();

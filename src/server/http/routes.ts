@@ -70,6 +70,13 @@ export function registerRoutes(r: Router, app: AppContext): void {
       },
       sending: { ...guards, running: app.sender.isRunning, lastOutcome: app.sender.lastOutcome, nextSendAt: app.sender.nextSendAt },
       review: { needsReview: (db.prepare("SELECT COUNT(*) c FROM email_draft WHERE status='needs_review'").get() as any).c },
+      // The interview never asks who you are - it asks about your customers - so a user can
+      // finish it, write drafts and send them all with no name at the bottom. An unsigned
+      // cold email reads as automated, which is the one thing this whole product is avoiding.
+      identity: {
+        signed: !!(db.prepare(
+          "SELECT 1 FROM product WHERE TRIM(COALESCE(sender_name,'')) <> '' LIMIT 1").get()),
+      },
       replies: { unhandled: (db.prepare("SELECT COUNT(*) c FROM reply WHERE handled=0 AND kind='reply'").get() as any).c },
       jobs: [...app.busy.entries()].map(([key, v]) => ({ key, ...v })),
       queue: app.llm.queue.stats(),
