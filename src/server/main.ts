@@ -9,10 +9,10 @@ import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { openDb } from "./db/index.ts";
-import { integrityReport, migrate, recoverAfterCrash, schemaVersion } from "./db/migrate.ts";
+import { integrityReport, migrate, recoverAfterCrash, repairOrphans, schemaVersion } from "./db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "./db/settings.ts";
 import { backfillQuality } from "./research/quality.ts";
-import { OpencodeSupervisor } from "./opencode/supervisor.ts";
+import { OpencodeSupervisor, locateOpencode } from "./opencode/supervisor.ts";
 import { LlmService } from "./llm/index.ts";
 import { probeModels, type ModelSlots } from "./opencode/models.ts";
 import { Fetcher } from "./research/fetcher.ts";
@@ -34,8 +34,97 @@ function openBrowser(url: string): void {
   try { spawn(cmd, [url], { stdio: "ignore", detached: true }).unref(); } catch { /* user can click the link */ }
 }
 
+/** Semver-ish compare. A string compare would rank "9.0.0" above "22.13.0". */
+export function meetsMinimum(actual: string, minimum: string): boolean {
+  const a = actual.split(".").map((n) => parseInt(n, 10) || 0);
+  const b = minimum.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0, y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+const HELP = `coldcall - local cold email, powered by opencode
+
+  coldcall              start the app and open the web UI
+  coldcall --no-open    start without opening a browser
+  coldcall repair       resolve references left dangling by an external edit
+  coldcall doctor       report what is and is not working, then exit
+  coldcall where        print where your data lives
+  coldcall --version    print the version
+
+Environment:
+  COLDCALL_PORT         web UI port (default 7788)
+  COLDCALL_HOME         data directory (default ~/.coldcall)
+`;
+
+/** Commands that inspect or repair without starting a server. */
+async function runCommand(cmd: string, home: string): Promise<boolean> {
+  const { openDb } = await import("./db/index.ts");
+  const dbPath = join(home, "coldcall.db");
+
+  if (cmd === "where") {
+    console.log(`data      ${home}`);
+    console.log(`database  ${dbPath}`);
+    console.log(`agent cwd ${join(home, "agent-cwd")}`);
+    return true;
+  }
+  if (cmd === "repair") {
+    const db = openDb(dbPath);
+    migrate(db);
+    const before = integrityReport(db);
+    if (before.ok) { console.log("Nothing to repair - every reference resolves."); return true; }
+    console.log(`Found ${before.violations.reduce((n, v) => n + v.count, 0)} dangling reference(s): ` +
+                before.violations.map((v) => `${v.count} in ${v.table}`).join(", "));
+    const resolved = repairOrphans(db);
+    const after = integrityReport(db);
+    console.log(after.ok
+      ? `Resolved ${resolved}. Rows whose reference was optional were kept.`
+      : `Resolved ${resolved}, but ${after.violations.reduce((n, v) => n + v.count, 0)} remain. Please report this.`);
+    return true;
+  }
+  if (cmd === "doctor") {
+    const db = openDb(dbPath);
+    migrate(db);
+    const bin = await locateOpencode();
+    const integrity = integrityReport(db);
+    const smtp = getSetting<{ configured?: boolean; user?: string }>(db, "smtp", {});
+    const slots = getSetting<ModelSlots>(db, "model_slots", EMPTY_SLOTS);
+    const line = (ok: boolean, label: string, detail: string) =>
+      console.log(`  ${ok ? "ok  " : "FAIL"}  ${label.padEnd(22)} ${detail}`);
+    console.log(`coldcall ${VERSION}\n`);
+    line(!!bin, "opencode", bin ?? "not found - curl -fsSL https://opencode.ai/install | bash");
+    line(meetsMinimum(process.versions.node, "22.13.0"), "node",
+         `${process.versions.node}${meetsMinimum(process.versions.node, "22.13.0") ? "" : " - node:sqlite needs >= 22.13.0"}`);
+    line(true, "database", `${dbPath} (schema v${schemaVersion(db)})`);
+    line(integrity.ok, "integrity", integrity.ok ? "no dangling references" : "run: coldcall repair");
+    line(slots.writing?.status === "ok", "writing model", slots.writing?.active
+      ? `${slots.writing.active.providerID}/${slots.writing.active.modelID}` : "not probed - start the app once");
+    line(slots.research?.status === "ok", "research model", slots.research?.active
+      ? `${slots.research.active.providerID}/${slots.research.active.modelID}` : "none - discovery falls back to manual");
+    line(!!smtp.configured, "mailbox", smtp.configured ? (smtp.user ?? "configured") : "not set up - Settings in the web UI");
+    return true;
+  }
+  return false;
+}
+
 export async function main(argv: string[] = []): Promise<void> {
   const home = coldcallHome();
+
+  if (argv.includes("--help") || argv.includes("-h")) { console.log(HELP); return; }
+  if (argv.includes("--version") || argv.includes("-v")) { console.log(VERSION); return; }
+
+  const cmd = argv.find((a) => !a.startsWith("-"));
+  if (cmd) {
+    await mkdir(home, { recursive: true, mode: 0o700 });
+    if (await runCommand(cmd, home)) return;
+    console.error(`Unknown command "${cmd}".\n`);
+    console.log(HELP);
+    process.exitCode = 1;
+    return;
+  }
+
   await mkdir(home, { recursive: true, mode: 0o700 });
   await mkdir(join(home, "run"), { recursive: true });
 

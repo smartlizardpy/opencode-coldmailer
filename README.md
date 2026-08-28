@@ -110,6 +110,30 @@ Verified live: asked to run `whoami`, the agent replies *"My available tools are
 npm run verify:sandbox
 ```
 
+## Commands
+
+| | |
+|---|---|
+| `coldcall` | Start the app and open the web UI |
+| `coldcall doctor` | Report what is and is not working, then exit |
+| `coldcall repair` | Resolve references left dangling by an editor outside the app |
+| `coldcall where` | Print where your data lives |
+| `coldcall --help` | The list above |
+
+`coldcall doctor` on a working install:
+
+```
+coldcall 0.1.0
+
+  ok    opencode               /Users/you/.opencode/bin/opencode
+  ok    node                   24.11.0
+  ok    database               /Users/you/.coldcall/coldcall.db (schema v6)
+  ok    integrity              no dangling references
+  ok    writing model          openai/gpt-5.6-terra-pro
+  ok    research model         opencode/nemotron-3-ultra-free
+  ok    mailbox                you@gmail.com
+```
+
 ## Scripts
 
 | Command | What it does |
