@@ -1302,10 +1302,22 @@ async function showCompany(ccId) {
         <td><a href="${esc(c.source_url)}" target="_blank" rel="noreferrer noopener">page</a></td></tr>`).join("")}
     </tbody></table></div>` : `<p class="card-note">No publishable address was found on their site.</p>`}
 
+    ${(() => { let n = []; try { n = JSON.parse(d.contact_notes || "[]"); } catch { n = []; }
+      return n.length ? `<div class="stat-label" style="margin-top:var(--s4)">${icon("list")} What happened when looking for contacts</div>
+        ${n.map((x) => `<div class="cellsub" style="padding:2px 0">${esc(x)}</div>`).join("")}` : ""; })()}
+
+    ${d.status === "failed" || d.status === "rejected" ? `<div class="row" style="margin-top:var(--s4)">
+      <button class="btn ghost" id="btnRetryCo">${icon("refresh")} Try this company again</button>
+      <span class="cellsub">Clears the cached pages and puts it back in the queue.</span></div>` : ""}
+
     <details style="margin-top:var(--s4)"><summary>${d.pages.length} pages fetched</summary>
       ${d.pages.map((p) => `<div class="cellsub mono"><a href="${esc(p.url)}" target="_blank" rel="noreferrer noopener">${esc(p.url)}</a></div>`).join("")}
     </details>`,
     async () => {}, "Close");
+  $("#btnRetryCo")?.addEventListener("click", async () => {
+    try { await api(`/api/companies/${ccId}/retry`, {}); toast("Queued for another try"); $("#modal").innerHTML = ""; renderCampaigns(); }
+    catch (e) { fail(e); }
+  });
 }
 
 /* ───────────────────────────────────────────────────────── health + events */

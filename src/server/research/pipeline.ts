@@ -503,8 +503,8 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
             page.id, confidence, isRoleAccount(email) ? 1 : 0, now(), now());
       added++;
     }
-    db.prepare("UPDATE campaign_company SET status=?, updated_at=? WHERE id=?")
-      .run(added > 0 ? "contacts_found" : "failed", now(), campaignCompanyId);
+    db.prepare("UPDATE campaign_company SET status=?, contact_notes=?, updated_at=? WHERE id=?")
+      .run(added > 0 ? "contacts_found" : "failed", JSON.stringify(notes.slice(0, 40)), now(), campaignCompanyId);
     if (added === 0) {
       const form = pages.some((p) => p.hasContactForm);
       db.prepare("UPDATE campaign_company SET error_code=?, error_message=? WHERE id=?")

@@ -240,6 +240,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
   r.get("/api/campaigns/:id/companies", ({ params }: RouteCtx) => db.prepare(
     `SELECT cc.id, cc.status, cc.relevance_score, cc.relevance_reason, cc.matched_signal, cc.selected,
        cc.discovered_via, cc.discovered_url, cc.error_code, cc.error_message, cc.rejected_reason,
+       cc.contact_notes,
        co.id company_id, co.name, co.domain, co.website_url, co.city, co.summary,
        (SELECT COUNT(*) FROM claim cl WHERE cl.campaign_company_id=cc.id AND cl.verified=1) verified_claims,
        (SELECT COUNT(*) FROM contact ct WHERE ct.company_id=co.id) contacts,
@@ -293,6 +294,21 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   r.post("/api/companies/:ccId/select", ({ params, body }: RouteCtx) => {
     db.prepare("UPDATE campaign_company SET selected=?, updated_at=? WHERE id=?").run(body.selected ? 1 : 0, now(), params.ccId);
+    return { ok: true };
+  });
+
+  /** Put one company back in the queue. Clears the failure so it is genuinely re-attempted. */
+  r.post("/api/companies/:ccId/retry", ({ params }: RouteCtx) => {
+    const cc = db.prepare("SELECT campaign_id FROM campaign_company WHERE id=?").get(params.ccId) as any;
+    if (!cc) throw bad("not found", "NOT_FOUND", 404);
+    db.prepare(
+      `UPDATE campaign_company SET status='discovered', selected=1, error_code=NULL,
+         error_message=NULL, rejected_reason=NULL, contact_notes='[]', updated_at=? WHERE id=?`,
+    ).run(now(), params.ccId);
+    // Drop the cached pages too: a retry that reads the same cached failure is not a retry.
+    db.prepare("DELETE FROM source_page WHERE company_id=(SELECT company_id FROM campaign_company WHERE id=?)")
+      .run(params.ccId);
+    app.bus.emit("companies:changed", { campaignId: cc.campaign_id });
     return { ok: true };
   });
 
