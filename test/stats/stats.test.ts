@@ -153,3 +153,46 @@ test("a company rejected after being fetched DOES count as researched", () => {
   assert.equal(dashboardStats(db).funnel.researched, 1,
     "we did fetch and judge it - the drop belongs at the next stage, not this one");
 });
+
+test("a reply rate is not offered until enough has been sent to mean anything", () => {
+  // One reply from one send is arithmetically 100% and a completely false impression. The
+  // dashboard reads this flag to decide whether to show a percentage or the raw counts.
+  const { db, ids } = world();
+  // A distinct contact each time: the schema allows only one draft per campaign, contact
+  // and step, which is the constraint that stops a person being mailed twice for one step.
+  const send = (replied: boolean) => {
+    const ct = ulid();
+    db.prepare("INSERT INTO contact (id,company_id,email,source_url,source_kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+      .run(ct, ids.co, `${ct}@x.com`, "https://x.com/contact", "published", now(), now());
+    const { d, v } = draft(db, { ...ids, ct }, "sent");
+    const s = ulid();
+    db.prepare(`INSERT INTO send_log (id,draft_id,version_id,campaign_id,contact_id,to_email,from_email,subject,message_id,status,sent_at,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,'sent',?,?)`)
+      .run(s, d, v, ids.c, ct, `${ct}@x.com`, "me@me.com", "s", `<${s}@x>`, now(), now());
+    if (replied) {
+      db.prepare(`INSERT INTO reply (id,send_log_id,campaign_id,contact_id,from_email,subject,body_text,received_at,handled,created_at,kind)
+                  VALUES (?,?,?,?,?,?,?,?,0,?,'reply')`)
+        .run(ulid(), s, ids.c, ct, `${ct}@x.com`, "re", "", now(), now());
+    }
+  };
+
+  send(true);
+  let s = dashboardStats(db);
+  assert.equal(s.replyRate, 1, "the arithmetic is still correct");
+  assert.equal(s.replyRateIsMeaningful, false, "but it is not worth showing as a rate");
+
+  for (let i = 0; i < 18; i++) send(false);
+  assert.equal(dashboardStats(db).replyRateIsMeaningful, false, "19 sends is still under the bar");
+
+  send(false);
+  s = dashboardStats(db);
+  assert.equal(s.funnel.sent, 20);
+  assert.equal(s.replyRateIsMeaningful, true);
+  assert.equal(s.replyRate, 0.05);
+});
+
+test("with nothing sent there is no rate at all, meaningful or otherwise", () => {
+  const s = dashboardStats(world().db);
+  assert.equal(s.replyRate, null);
+  assert.equal(s.replyRateIsMeaningful, false);
+});

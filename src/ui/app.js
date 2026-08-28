@@ -389,9 +389,17 @@ async function renderDashboard() {
         <div class="stat-foot">${stats.repliesUnhandled ? `${num(stats.repliesUnhandled)} unhandled` : "all handled"}</div>
       </div>
       <div class="stat">
-        <div class="stat-label">${icon("graph-up")} Reply rate</div>
-        <div class="stat-value">${pct(stats.replyRate)}</div>
-        <div class="stat-foot">${stats.funnel.sent ? `${num(stats.funnel.replied)} of ${num(stats.funnel.sent)} sent` : "nothing sent yet"}</div>
+        <div class="stat-label">${icon("graph-up")} Replies</div>
+        <div class="stat-value">${
+          // A percentage from a handful of sends is noise wearing a number's clothes.
+          // "100%" from one send is true arithmetic and a completely false impression.
+          stats.replyRateIsMeaningful ? pct(stats.replyRate)
+          : stats.funnel.sent ? `${num(stats.funnel.replied)}<small> of ${num(stats.funnel.sent)}</small>`
+          : "—"}</div>
+        <div class="stat-foot">${
+          stats.replyRateIsMeaningful ? `${num(stats.funnel.replied)} of ${num(stats.funnel.sent)} sent`
+          : stats.funnel.sent ? `too few sent to be a rate yet`
+          : "nothing sent yet"}</div>
       </div>
       <div class="stat">
         <div class="stat-label">${icon("shield-check")} Verified facts</div>

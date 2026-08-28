@@ -14,6 +14,15 @@ import { auditIssueCount } from "./mail/deliverability.ts";
  * three stages count COMPANIES, the rest count EMAILS. Once follow-ups exist one company can
  * account for several drafts, so the UI labels the unit rather than implying a single line.
  */
+/**
+ * How many sends before a reply rate is worth showing as a percentage.
+ *
+ * Not a statistical threshold - at these volumes there is no honest confidence interval to
+ * quote - but the point where a percentage stops being actively misleading. Below it the
+ * counts are shown instead, which is the true thing we actually know.
+ */
+export const MIN_SENDS_FOR_RATE = 20;
+
 export interface Funnel {
   discovered: number; researched: number; contacted: number;   // companies
   drafted: number; approved: number; sent: number; replied: number;   // emails
@@ -27,6 +36,12 @@ export interface DashboardStats {
   sentLast24h: number;
   sentLast7d: number;
   replyRate: number | null;
+  /**
+   * Below this many sends a reply rate is noise dressed as a number. One reply from one send
+   * is not a 100% reply rate, and showing it as one would flatter the user into thinking the
+   * writing is working when nothing has been measured yet.
+   */
+  replyRateIsMeaningful: boolean;
   repliesUnhandled: number;
   bounces: number;
   deliverabilityIssues: number;
@@ -114,6 +129,7 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     sentLast24h: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? ${scope}`, Date.now() - 24 * 3600_000, ...arg),
     sentLast7d: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? ${scope}`, Date.now() - 7 * 24 * 3600_000, ...arg),
     replyRate: sent > 0 ? funnel.replied / sent : null,
+    replyRateIsMeaningful: sent >= MIN_SENDS_FOR_RATE,
     repliesUnhandled: one(db, `SELECT COUNT(*) c FROM reply WHERE handled=0 AND kind='reply' ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
     bounces: one(db, `SELECT COUNT(*) c FROM reply WHERE kind IN ('bounce_hard','bounce_soft') ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
     // Read from the cached DNS audit only. A stats poll must never block on the network.
