@@ -73,6 +73,7 @@ const NAV = [
   ]},
   { group: "Setup", items: [
     { id: "product", label: "Product", icon: "building" },
+    { id: "deliverability", label: "Deliverability", icon: "shield-check", badge: "deliverabilityIssues", tone: "attn" },
     { id: "settings", label: "Settings", icon: "settings" },
   ]},
   { group: "System", items: [
@@ -87,6 +88,7 @@ const TITLES = {
   outbox:    ["Outbox", "Approved emails, the daily cap, and scheduled follow-ups."],
   replies:   ["Replies", "Matched to the thread they answer. Draft a response or write your own."],
   product:   ["Product", "What you sell, in your own words. Everything downstream reads this."],
+  deliverability: ["Deliverability", "Whether your mail will be accepted before anyone decides whether to read it."],
   settings:  ["Settings", "Mailbox, models, sending limits and the never-contact list."],
   activity:  ["Activity", "Every model call, including the ones that failed and what they returned."],
 };
@@ -299,7 +301,7 @@ async function render() {
   const fn = {
     dashboard: renderDashboard, campaigns: renderCampaigns, review: renderReview,
     outbox: renderOutbox, replies: renderReplies, product: renderProduct,
-    settings: renderSettings, activity: renderActivity,
+    settings: renderSettings, activity: renderActivity, deliverability: renderDeliverability,
   }[S.route];
   c.innerHTML = page(skeleton());
   try { await fn(); } catch (e) { fail(e); c.innerHTML = page(empty("warning-triangle", "Couldn't load this", e.message)); }
@@ -604,6 +606,21 @@ const FLAG_TEXT = {
   subject_question: "Subject is a question",
 };
 
+/**
+ * Only ever rendered when something is wrong. A green "0 issues" panel on every draft
+ * trains the reviewer to skip the box, which is exactly when it needs to be read.
+ */
+function spamBox(risk) {
+  if (!risk) return "";
+  const bad = risk.checks.filter((c) => c.severity !== "ok");
+  if (!bad.length) return "";
+  const critical = bad.some((c) => c.severity === "critical");
+  return `<div class="flagbox" ${critical ? 'data-sev="critical"' : ""}>
+    ${icon("shield-check")} <b>${critical ? "This will be filtered" : "Filters will notice this"}</b>
+    <ul>${bad.map((c) => `<li>${esc(c.detail)}${c.fix ? ` <span style="opacity:.85">${esc(c.fix)}</span>` : ""}</li>`).join("")}</ul>
+  </div>`;
+}
+
 async function renderReview() {
   if (!S.campaigns.length) S.campaigns = await api("/api/campaigns");
   if (!S.campaign && S.campaigns.length) S.campaign = S.campaigns[0].id;
@@ -697,6 +714,7 @@ async function drawLetter() {
         ${flags.length ? `<div class="flagbox">${icon("warning-triangle")} <b>Worth a look before you approve</b>
           <ul>${flags.map((f) => `<li>${esc(FLAG_TEXT[f.flag] ?? f.flag)} — <span style="opacity:.85">${esc(f.detail)}</span></li>`).join("")}</ul>
         </div>` : ""}
+        ${spamBox(full.deliverability)}
         <div class="letter-subject">${esc(full.subject)}</div>
         <div class="letter-text">${esc(full.body_text)}</div>
         ${full.claims.length ? `<div style="margin-top:var(--s5)">
@@ -1233,6 +1251,96 @@ async function renderActivity() {
     </table></div>` : empty("graph-up", "No model calls yet", "Every call is logged here, including what a failed one returned."),
     `<label class="check"><input type="checkbox" id="failedOnly" ${failedOnly ? "checked" : ""}> Failures only</label>`);
   $("#failedOnly").onchange = (e) => { S.filter = e.target.checked ? "failed" : ""; renderActivity(); };
+}
+
+/* ─────────────────────────────────────────────────── deliverability */
+
+const SEV = {
+  critical: ["bad", "warning-triangle", "Fix before sending"],
+  warning:  ["warn", "warning-triangle", "Worth fixing"],
+  info:     ["", "eye", "For information"],
+  ok:       ["ok", "check", "Passing"],
+};
+
+// A ring rather than a bar: the number is the point, and a bar invites comparison
+// against other bars that do not exist on this screen.
+function scoreRing(score, caption) {
+  const r = 34, c = 2 * Math.PI * r;
+  const tone = score >= 85 ? "var(--ok)" : score >= 60 ? "var(--warn)" : "var(--bad)";
+  return `<div class="ring">
+    <svg viewBox="0 0 80 80" class="ring-svg" aria-hidden="true">
+      <circle cx="40" cy="40" r="${r}" class="ring-track"/>
+      <circle cx="40" cy="40" r="${r}" class="ring-fill" stroke="${tone}"
+        stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c * (1 - score / 100)).toFixed(1)}"/>
+    </svg>
+    <div class="ring-mid"><span class="ring-num" style="color:${tone}">${score}</span></div>
+    <div class="ring-cap">${esc(caption)}</div>
+  </div>`;
+}
+
+const checkRow = (c) => {
+  const [tone, ic] = SEV[c.severity] ?? SEV.info;
+  return `<div class="dcheck" data-sev="${c.severity}">
+    <span class="dcheck-icon ${tone}">${icon(ic)}</span>
+    <div class="dcheck-body">
+      <div class="dcheck-top"><b>${esc(c.label)}</b><span class="tag ${tone}">${esc(c.severity)}</span></div>
+      <p class="dcheck-detail">${esc(c.detail)}</p>
+      ${c.fix ? `<p class="dcheck-fix">${icon("arrow-right")}${esc(c.fix)}</p>` : ""}
+      ${c.found ? `<code class="dcheck-found">${esc(c.found)}</code>` : ""}
+    </div>
+  </div>`;
+};
+
+async function renderDeliverability(refresh = false) {
+  const [audit, stats] = await Promise.all([
+    api(`/api/deliverability${refresh ? "?refresh=1" : ""}`),
+    S.stats ? Promise.resolve(S.stats) : api("/api/stats"),
+  ]);
+  S.stats = stats;
+
+  if (!audit.domain) {
+    $("#content").innerHTML = page(empty("shield-check", "No sending address yet",
+      "Set your from address in Settings and this page will audit the domain you send from.",
+      `<button class="btn" id="toSettings">Open settings</button>`));
+    $("#toSettings").onclick = () => go("settings");
+    return;
+  }
+
+  const bad = audit.checks.filter((c) => c.severity === "critical").length;
+  const warn = audit.checks.filter((c) => c.severity === "warning").length;
+
+  $("#content").innerHTML = page(`
+    <div class="card dpanel">
+      ${scoreRing(audit.score, "acceptance")}
+      <div class="dpanel-text">
+        <h2 class="dtitle">${esc(audit.domain)}</h2>
+        <p class="dlede">${esc(
+          bad ? `${bad} thing${bad === 1 ? "" : "s"} here will send your mail to spam regardless of what it says.`
+          : warn ? `Nothing is broken. ${warn} thing${warn === 1 ? "" : "s"} would make you harder to filter out.`
+          : "Your domain is set up correctly. What is left is what you write.")}</p>
+        <p class="card-note">Checked ${esc(ago(audit.checkedAt))} over DNS. Nothing was sent and nothing left this machine except the lookups.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Sender domain</h2>
+        <span class="cellsub">SPF, DKIM and DMARC are what a receiving server checks before it looks at your words.</span></div>
+      <div class="dchecks">${audit.checks.map(checkRow).join("")}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>What this does not check</h2></div>
+      <p class="card-note">Whether you are on a blocklist, and how your address has behaved historically.
+      Both are held by the receiving providers and neither is readable from here. The one signal you
+      control is volume: a new address that sends thirty a day looks like a person, and one that sends
+      three hundred looks like a list.</p>
+    </div>`,
+    `<button class="btn ghost" id="recheck">${icon("refresh")}Re-check</button>`);
+
+  $("#recheck").onclick = async (e) => {
+    e.target.closest("button").disabled = true;
+    await renderDeliverability(true).catch(fail);
+  };
 }
 
 /* ───────────────────────────────────────────────────────── dialogs */

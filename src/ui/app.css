@@ -297,6 +297,9 @@ th.num,td.num{text-align:right;font-family:var(--mono);font-size:12.5px}
 .flagbox{background:var(--warn-bg);border:1px solid var(--warn);color:var(--warn);border-radius:var(--r);
   padding:var(--s3) var(--s4);margin-bottom:var(--s4);font-size:12.5px}
 .flagbox ul{margin:var(--s2) 0 0;padding-left:var(--s5)}
+/* Same box, raised severity. Kept here rather than as an inline style so the colour
+   contract stays in one file and both modes are checked together. */
+.flagbox[data-sev="critical"]{background:var(--bad-bg);border-color:var(--bad);color:var(--bad)}
 
 /* ─────────────────────────────────────────────── command palette */
 .scrim{position:fixed;inset:0;background:rgba(10,14,20,.5);backdrop-filter:blur(3px);z-index:60;
@@ -379,3 +382,47 @@ details[open] summary::before{transform:rotate(90deg)}
   .nav-item{justify-content:center;padding:9px 0}
   .content{padding:var(--s5) var(--s4) var(--s12)}
 }
+
+/* ── deliverability ─────────────────────────────────────────────────── */
+
+.dpanel { display: flex; gap: var(--s5); align-items: center; }
+.dpanel-text { min-width: 0; }
+.dtitle { font-family: var(--display); font-size: 20px; letter-spacing: -0.01em; }
+.dlede { margin-top: var(--s2); color: var(--text); font-size: 14px; max-width: 62ch; }
+.dpanel .card-note { margin-top: var(--s3); }
+
+.ring { position: relative; width: 96px; flex: 0 0 96px; text-align: center; }
+.ring-svg { width: 96px; height: 96px; transform: rotate(-90deg); display: block; }
+.ring-track { fill: none; stroke: var(--border); stroke-width: 7; }
+.ring-fill {
+  fill: none; stroke-width: 7; stroke-linecap: round;
+  transition: stroke-dashoffset 700ms cubic-bezier(.2,.7,.3,1);
+}
+.ring-mid { position: absolute; inset: 0 0 auto; height: 96px; display: grid; place-items: center; }
+.ring-num { font-family: var(--display); font-size: 27px; font-variant-numeric: tabular-nums; }
+.ring-cap { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+
+.dchecks { display: grid; gap: 1px; background: var(--border); border-radius: var(--r-lg); overflow: hidden; }
+.dcheck { display: flex; gap: var(--s3); padding: var(--s4); background: var(--raised); }
+.dcheck[data-sev="ok"] .dcheck-detail, .dcheck[data-sev="info"] .dcheck-detail { color: var(--muted); }
+.dcheck-icon { flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 999px;
+  background: var(--border); color: var(--muted); margin-top: 1px; }
+.dcheck-icon.ok  { background: color-mix(in srgb, var(--ok) 16%, transparent);  color: var(--ok); }
+.dcheck-icon.warn{ background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.dcheck-icon.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.dcheck-body { min-width: 0; flex: 1; }
+.dcheck-top { display: flex; align-items: center; gap: var(--s2); }
+.dcheck-detail { margin-top: 2px; font-size: 13px; max-width: 76ch; }
+/* The fix is a tinted callout, not coloured text: --primary is a fill colour in this
+   palette and only reaches 3.39 against the dark surface, which is below AA for body copy. */
+.dcheck-fix { margin-top: var(--s2); font-size: 13px; color: var(--text);
+  display: flex; gap: 7px; align-items: baseline; max-width: 76ch;
+  background: var(--surface); border-left: 2px solid var(--accent);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0; padding: 7px 10px; }
+.dcheck-fix svg { flex: 0 0 auto; position: relative; top: 2px; color: var(--accent); }
+.dcheck-found { display: block; margin-top: var(--s2); font-family: var(--mono); font-size: 11.5px;
+  color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 5px 8px; overflow-x: auto; white-space: pre; }
+
+@media (max-width: 720px) { .dpanel { flex-direction: column; align-items: flex-start; } }
+@media (prefers-reduced-motion: reduce) { .ring-fill { transition: none; } }

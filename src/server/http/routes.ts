@@ -1,12 +1,13 @@
 /** The JSON API. Every long job runs in the background and reports progress over SSE. */
 import type { Router, RouteCtx } from "./server.ts";
 import type { AppContext } from "../context.ts";
-import { readImapConfig, readSmtpConfig, sanitizeSmtp, type SmtpSettings } from "../context.ts";
+import { carriesSecret, readImapConfig, readSmtpConfig, sanitizeSmtp, type SmtpSettings } from "../context.ts";
 import { ulid, now, tx } from "../db/index.ts";
 import { getSetting, setSetting, type SendingSettings } from "../db/settings.ts";
 import { probeModels } from "../opencode/models.ts";
 import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/secrets.ts";
 import { verifySmtp, sendMail, newMessageId, GMAIL_PRESET } from "../mail/smtp.ts";
+import { auditCached, scoreMessage, warmAudit } from "../mail/deliverability.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
@@ -42,6 +43,10 @@ function background(app: AppContext, key: string, label: string, fn: () => Promi
 
 export function registerRoutes(r: Router, app: AppContext): void {
   const { db } = app;
+
+  // Looked up once at boot so the sidebar badge is right on the first paint rather than
+  // only after someone happens to open the Deliverability page.
+  warmAudit(((getSetting(db, "smtp") ?? {}) as SmtpSettings).fromEmail ?? "");
 
   /* ------------------------------------------------------------- health */
   r.get("/api/health", () => {
@@ -573,6 +578,9 @@ export function registerRoutes(r: Router, app: AppContext): void {
       // send time, so it has to be rendered here too, from the same function.
       ...d, body_text: renderedBody(db, d, productForDraft(db, params.id)),
       message_body: d.body_text,
+      // Scored on the message the recipient actually receives, signature included - the
+      // signature is where a stray link or a shouted company name would hide.
+      deliverability: scoreMessage(d.subject, renderedBody(db, d, productForDraft(db, params.id))),
       claims, company: company?.name ?? "",
       // Shown as a warning in review, so it is seen before approving rather than as a
       // silent refusal at send time.
@@ -693,6 +701,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   /* -------------------------------------------------------- suppression */
+  r.get("/api/deliverability", async ({ query }: RouteCtx) => {
+    const smtp = (getSetting(db, "smtp") ?? {}) as SmtpSettings;
+    return auditCached(smtp.fromEmail ?? smtp.user ?? "", query.get("refresh") === "1");
+  });
+
   r.get("/api/suppression", () => db.prepare("SELECT * FROM suppression ORDER BY id DESC").all());
   r.post("/api/suppression", ({ body }: RouteCtx) => {
     const raw = String(body.pattern ?? "").trim();

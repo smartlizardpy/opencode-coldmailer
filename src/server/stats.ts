@@ -7,6 +7,7 @@
  * engagement number is the reply rate.
  */
 import type { Db } from "./db/index.ts";
+import { auditIssueCount } from "./mail/deliverability.ts";
 
 /**
  * The funnel changes unit halfway through, and pretending otherwise makes it lie: the first
@@ -27,6 +28,7 @@ export interface DashboardStats {
   sentLast7d: number;
   replyRate: number | null;
   repliesUnhandled: number;
+  deliverabilityIssues: number;
   followUpsDue: number;
   suppressed: number;
   campaigns: number;
@@ -103,6 +105,8 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     sentLast7d: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? ${scope}`, Date.now() - 7 * 24 * 3600_000, ...arg),
     replyRate: sent > 0 ? funnel.replied / sent : null,
     repliesUnhandled: one(db, `SELECT COUNT(*) c FROM reply WHERE handled=0 ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
+    // Read from the cached DNS audit only. A stats poll must never block on the network.
+    deliverabilityIssues: auditIssueCount(),
     followUpsDue: 0,        // filled by the route, which has the sequence module
     suppressed: one(db, "SELECT COUNT(*) c FROM suppression"),
     campaigns: one(db, "SELECT COUNT(*) c FROM campaign"),
