@@ -9,7 +9,17 @@ import { tx, now, type Db } from "./index.ts";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
-export interface Migration { version: number; name: string; sql: string }
+export interface Migration { version: number; name: string; sql: string; noFk: boolean }
+
+/**
+ * A migration that rebuilds a table must run with foreign keys OFF.
+ *
+ * SQLite cannot drop a table-level constraint, so changing one means recreating the table -
+ * and with FKs on, DROP TABLE performs an implicit DELETE FROM first, which cascades into
+ * every child row. That would silently delete every draft version and send log. A migration
+ * opts out by starting with the marker below.
+ */
+const NO_FK_MARKER = "-- coldcall:no-foreign-keys";
 
 export function loadMigrations(dir = MIGRATIONS_DIR): Migration[] {
   return readdirSync(dir)
@@ -17,7 +27,8 @@ export function loadMigrations(dir = MIGRATIONS_DIR): Migration[] {
     .map((f) => {
       const m = /^(\d+)_(.+)\.sql$/.exec(f);
       if (!m) throw new Error(`migration filename must be <version>_<name>.sql, got "${f}"`);
-      return { version: Number(m[1]), name: m[2], sql: readFileSync(join(dir, f), "utf8") };
+      const sql = readFileSync(join(dir, f), "utf8");
+      return { version: Number(m[1]), name: m[2], sql, noFk: sql.includes(NO_FK_MARKER) };
     })
     .sort((a, b) => a.version - b.version);
 }
@@ -37,13 +48,26 @@ export function migrate(db: Db, dir?: string): number[] {
   const ran: number[] = [];
 
   for (const m of pending) {
-    // Each migration is its own transaction, so a failure halfway through a set leaves the
-    // earlier ones durably applied and the failing one fully rolled back.
-    tx(db, () => {
-      db.exec(m.sql);
-      db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)")
-        .run(m.version, m.name, now());
-    });
+    // PRAGMA foreign_keys is a no-op inside a transaction, so it has to be set before BEGIN.
+    if (m.noFk) db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      // Each migration is its own transaction, so a failure halfway through a set leaves the
+      // earlier ones durably applied and the failing one fully rolled back.
+      tx(db, () => {
+        db.exec(m.sql);
+        db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)")
+          .run(m.version, m.name, now());
+      });
+    } finally {
+      if (m.noFk) {
+        db.exec("PRAGMA foreign_keys = ON");
+        // Prove the rebuild did not leave a dangling reference behind.
+        const violations = db.prepare("PRAGMA foreign_key_check").all();
+        if (violations.length > 0) {
+          throw new Error(`migration ${m.version} left ${violations.length} foreign key violation(s): ${JSON.stringify(violations.slice(0, 3))}`);
+        }
+      }
+    }
     ran.push(m.version);
   }
   return ran;

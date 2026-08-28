@@ -12,6 +12,8 @@ import { approveDraft, isSuppressed, sendGuards, sendOne, suppress } from "../qu
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, briefOf } from "../research/pipeline.ts";
 import { composeDraft, saveHumanEdit } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
+import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
+import { DEFAULT_FOLLOWUPS, dueFollowUps, listSteps, seedDefaultSteps, setSteps, upcomingFollowUps } from "../queue/sequences.ts";
 
 const bad = (msg: string, code = "BAD_REQUEST", status = 400) => Object.assign(new Error(msg), { code, status });
 
@@ -60,10 +62,20 @@ export function registerRoutes(r: Router, app: AppContext): void {
         lastVerifiedAt: smtp.lastVerifiedAt ?? null, lastError: smtp.lastError ?? null,
       },
       sending: { ...guards, running: app.sender.isRunning, lastOutcome: app.sender.lastOutcome, nextSendAt: app.sender.nextSendAt },
+      review: { needsReview: (db.prepare("SELECT COUNT(*) c FROM email_draft WHERE status='needs_review'").get() as any).c },
+      replies: { unhandled: (db.prepare("SELECT COUNT(*) c FROM reply WHERE handled=0").get() as any).c },
       jobs: [...app.busy.entries()].map(([key, v]) => ({ key, ...v })),
       queue: app.llm.queue.stats(),
       ok: app.supervisor.status === "ready" && slots.writing.status === "ok",
     };
+  });
+
+  r.get("/api/stats", ({ query }: RouteCtx) => {
+    const campaignId = query.get("campaign") ?? undefined;
+    const stats = dashboardStats(db, campaignId);
+    // The funnel is a DB query; follow-ups need the sequence rules, so they are filled here.
+    stats.followUpsDue = dueFollowUps(db, campaignId, 500).length;
+    return stats;
   });
 
   /* ----------------------------------------------------------- settings */
@@ -208,6 +220,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
           Math.min(5, Math.max(1, Number(body.contacts_per_company) || 3)),
           body.allow_inferred_emails ? 1 : 0,
           Math.max(1, Number(body.daily_send_limit) || 30), now(), now());
+    seedDefaultSteps(db, id);
     return db.prepare("SELECT * FROM campaign WHERE id=?").get(id);
   });
 
@@ -248,6 +261,34 @@ export function registerRoutes(r: Router, app: AppContext): void {
     const out = addManualCompanies(db, params.id, entries);
     app.bus.emit("companies:changed", { campaignId: params.id });
     return out;
+  });
+
+  r.post("/api/campaigns/:id/select-all", ({ params, body }: RouteCtx) => {
+    // Rejected companies are never bulk-selected: they were already judged not to be the
+    // target kind, and re-including them silently undoes that.
+    const res = db.prepare(
+      "UPDATE campaign_company SET selected=?, updated_at=? WHERE campaign_id=? AND status != 'rejected'",
+    ).run(body.selected ? 1 : 0, now(), params.id);
+    return { changed: Number(res.changes) };
+  });
+
+  r.post("/api/drafts/bulk-approve", ({ body }: RouteCtx) => {
+    const ids: string[] = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
+    let approved = 0, skipped = 0;
+    tx(db, () => {
+      for (const id of ids) {
+        const d = db.prepare("SELECT contact_id FROM email_draft WHERE id=? AND status IN ('draft','needs_review')").get(id) as any;
+        if (!d) { skipped++; continue; }
+        const ct = db.prepare("SELECT email FROM contact WHERE id=?").get(d.contact_id) as { email: string } | undefined;
+        // Suppression is re-checked here as well as at send: approving a suppressed address
+        // should not even be possible.
+        if (!ct || isSuppressed(db, ct.email).suppressed) { skipped++; continue; }
+        approveDraft(db, id);
+        approved++;
+      }
+    });
+    app.bus.emit("drafts:changed", {});
+    return { approved, skipped };
   });
 
   r.post("/api/companies/:ccId/select", ({ params, body }: RouteCtx) => {
@@ -314,6 +355,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
   /* ------------------------------------------------------------- drafts */
   r.get("/api/campaigns/:id/drafts", ({ params }: RouteCtx) => db.prepare(
     `SELECT d.draft_id, d.status, d.subject, d.body_text, d.version, d.author, d.personalization,
+       d.step_number, d.word_count, d.quality_flags,
        ct.email, ct.full_name, ct.title, ct.source_kind, ct.source_url, ct.confidence,
        co.name company, co.domain,
        (SELECT sent_at FROM send_log s WHERE s.draft_id=d.draft_id AND s.status='sent') sent_at
@@ -329,8 +371,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
     const claims = cited.length
       ? db.prepare(`SELECT id,claim,quote,source_url,verified FROM claim WHERE id IN (${cited.map(() => "?").join(",")})`).all(...cited.map((c) => c.claim_id))
       : [];
+    const company = db.prepare(
+      `SELECT co.name FROM campaign_company cc JOIN company co ON co.id=cc.company_id WHERE cc.id=?`,
+    ).get(d.campaign_company_id) as { name: string } | undefined;
     return {
-      ...d, claims,
+      ...d, claims, company: company?.name ?? "",
       versions: db.prepare("SELECT version,subject,author,edit_note,created_at FROM email_draft_version WHERE draft_id=? ORDER BY version DESC").all(params.id),
       contact: db.prepare("SELECT * FROM contact WHERE id=?").get(d.contact_id),
     };
@@ -395,6 +440,55 @@ export function registerRoutes(r: Router, app: AppContext): void {
     setSetting(db, "sending", { ...getSetting(db, "sending", {}), paused: true });
     app.sender.stop();
     return { running: false };
+  });
+
+  /* ---------------------------------------------------------- sequences */
+  r.get("/api/campaigns/:id/sequence", ({ params }: RouteCtx) => ({
+    steps: listSteps(db, params.id),
+    defaults: DEFAULT_FOLLOWUPS,
+    due: dueFollowUps(db, params.id),
+    upcoming: upcomingFollowUps(db, params.id),
+  }));
+
+  r.post("/api/campaigns/:id/sequence", ({ params, body }: RouteCtx) => {
+    if (!Array.isArray(body.steps)) throw bad("steps must be a list");
+    setSteps(db, params.id, body.steps);
+    return { steps: listSteps(db, params.id) };
+  });
+
+  /** Draft every follow-up that is due. Nothing is approved or sent - they land in Review. */
+  r.post("/api/campaigns/:id/sequence/draft-due", ({ params }: RouteCtx) =>
+    background(app, `followups:${params.id}`, "Drafting follow-ups", async () => {
+      const due = dueFollowUps(db, params.id);
+      const out = { drafted: 0, failures: [] as string[] };
+      for (const [i, f] of due.entries()) {
+        app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: due.length, company: f.company, stage: `follow-up #${f.step}` });
+        try {
+          await composeDraft({ db, llm: app.llm }, f.campaignCompanyId, f.contactId, {
+            instruction: f.instruction, step: f.step, followsSendId: f.followsSendId, dueAt: f.dueAt,
+          });
+          out.drafted++;
+        } catch (e) {
+          out.failures.push(`${f.company}: ${(e as Error).message.slice(0, 120)}`);
+        }
+      }
+      app.bus.emit("drafts:changed", { campaignId: params.id });
+      return out;
+    }));
+
+  /* ------------------------------------------------------------- export */
+  r.get("/api/campaigns/:id/export/:kind", ({ params, res }: RouteCtx) => {
+    const kind = params.kind as keyof typeof EXPORTS;
+    if (!(kind in EXPORTS)) throw bad("unknown export");
+    const rows = EXPORTS[kind](db, params.id) as Array<Record<string, unknown>>;
+    const csv = toCsv(rows);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="coldcall-${kind}-${stamp}.csv"`,
+    });
+    res.end("\ufeff" + csv);   // BOM so Excel reads UTF-8 correctly
+    return undefined;
   });
 
   /* -------------------------------------------------------- suppression */

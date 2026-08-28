@@ -5,7 +5,7 @@
  * dependency risk than it removes convenience, and this keeps the install a download.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppContext } from "../context.ts";
@@ -107,13 +107,18 @@ export function createApp(app: AppContext): Server {
         const body = req.method === "POST" ? await readBody(req) : {};
         const out = await m.handler({ req, res, app, params: m.params, query: url.searchParams, body });
         if (res.writableEnded) return;
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          // API responses are live state and must never be cached. Without this the browser
+          // applies heuristic caching to plain GETs and will happily show yesterday's data.
+          "cache-control": "no-store",
+        });
         return res.end(JSON.stringify(out ?? { ok: true }));
       } catch (e) {
         const err = e as any;
         app.log(`API ${path} failed: ${err?.message}`);
         if (res.writableEnded) return;
-        res.writeHead(err?.status ?? 500, { "content-type": "application/json" });
+        res.writeHead(err?.status ?? 500, { "content-type": "application/json", "cache-control": "no-store" });
         return res.end(JSON.stringify({
           error: err?.message ?? "internal error",
           code: err?.code ?? "INTERNAL",
@@ -124,18 +129,40 @@ export function createApp(app: AppContext): Server {
     }
 
     // Static UI. Everything unknown falls through to index.html (single page app).
+    // index.html gets its asset URLs stamped with the app version, so a browser that cached
+    // the previous release's CSS under an older policy cannot show a stale stylesheet.
     const rel = path === "/" ? "index.html" : path.replace(/^\/+/, "");
     const safe = join(UI_DIR, rel);
     if (!safe.startsWith(UI_DIR)) { res.writeHead(403); return res.end(); }
+    // Version assets by mtime, not by app version: editing a file during development changes
+    // the URL, and so does shipping a new release. Keying on the app version alone leaves the
+    // browser serving a stale stylesheet for every edit within one version.
+    const assetVersion = async (file: string): Promise<string> => {
+      try {
+        const st = await stat(join(UI_DIR, file));
+        return `${app.version}-${Math.floor(st.mtimeMs).toString(36)}`;
+      } catch { return app.version; }
+    };
+    const stamp = async (html: Buffer): Promise<string> => {
+      const [css, js] = await Promise.all([assetVersion("app.css"), assetVersion("app.js")]);
+      return html.toString("utf8").replace(/(href|src)="\/(app\.css|app\.js)"/g,
+        (_m, attr, file) => `${attr}="/${file}?v=${encodeURIComponent(file === "app.css" ? css : js)}"`);
+    };
+
     try {
       const data = await readFile(safe);
-      res.writeHead(200, { "content-type": MIME[extname(safe)] ?? "application/octet-stream" });
-      return res.end(data);
+      res.writeHead(200, {
+        "content-type": MIME[extname(safe)] ?? "application/octet-stream",
+        // Everything is served from disk on localhost, so revalidating costs nothing and an
+        // upgrade never leaves a stale stylesheet behind.
+        "cache-control": "no-cache",
+      });
+      return res.end(extname(safe) === ".html" ? await stamp(data) : data);
     } catch {
       try {
         const data = await readFile(join(UI_DIR, "index.html"));
-        res.writeHead(200, { "content-type": MIME[".html"] });
-        return res.end(data);
+        res.writeHead(200, { "content-type": MIME[".html"], "cache-control": "no-cache" });
+        return res.end(await stamp(data));
       } catch {
         res.writeHead(404); return res.end("UI not found");
       }

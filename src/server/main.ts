@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { openDb } from "./db/index.ts";
 import { migrate, recoverAfterCrash, schemaVersion } from "./db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "./db/settings.ts";
+import { backfillQuality } from "./research/quality.ts";
 import { OpencodeSupervisor } from "./opencode/supervisor.ts";
 import { LlmService } from "./llm/index.ts";
 import { probeModels, type ModelSlots } from "./opencode/models.ts";
@@ -45,6 +46,9 @@ export async function main(argv: string[] = []): Promise<void> {
   const applied = migrate(db);
   if (applied.length) log(`applied migrations: ${applied.join(", ")} (schema v${schemaVersion(db)})`);
   seedDefaults(db);
+  const backfilled = backfillQuality(db as never);
+  if (backfilled) log(`backfilled quality checks on ${backfilled} existing draft version(s)`);
+
   const recovered = recoverAfterCrash(db);
   if (recovered.jobsReset || recovered.sendsFailed) {
     log(`recovered from an unclean shutdown: ${recovered.jobsReset} job(s) requeued, ${recovered.sendsFailed} interrupted send(s) marked failed (never retried automatically)`);

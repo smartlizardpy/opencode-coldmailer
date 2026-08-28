@@ -4,189 +4,65 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>coldcall</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✉️</text></svg>">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%232f6ecf'/><path d='M5 8.5h14M5 12h14M5 15.5h9' stroke='white' stroke-width='2' stroke-linecap='round'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<header>
-  <div class="brand"><span class="dot" id="statusDot"></span><strong>coldcall</strong><span class="muted" id="statusText">starting…</span></div>
-  <nav id="tabs">
-    <button data-tab="setup" class="active">Setup</button>
-    <button data-tab="product">Product</button>
-    <button data-tab="campaign">Campaign</button>
-    <button data-tab="review">Review</button>
-    <button data-tab="send">Send</button>
-    <button data-tab="replies">Replies</button>
-    <button data-tab="logs">Logs</button>
-  </nav>
-</header>
+<div id="sprite"></div>
 
-<div id="banner" class="banner hidden"></div>
-<div id="jobbar" class="jobbar hidden"><span class="spinner"></span><span id="jobtext"></span></div>
+<div class="app" id="app" data-collapsed="0">
 
-<main>
-<!-- ───────────────────────────────── setup -->
-<section id="tab-setup" class="tab hidden">
-  <h1>Setup</h1>
-  <p class="lede">Everything runs on your machine. opencode does the thinking for free; your mailbox does the sending.</p>
-
-  <div class="card">
-    <h2>Models</h2>
-    <div id="modelInfo" class="muted">Not probed yet.</div>
-    <button id="btnProbe" class="secondary">Re-probe models</button>
-    <p class="hint">Web search only works on the free <code>opencode/*</code> models — that's how opencode gates it, so research runs free and your own provider is used for writing.</p>
-  </div>
-
-  <div class="card">
-    <h2>Mailbox</h2>
-    <p class="hint">Gmail needs an <b>app password</b>, not your normal one. Google Account → Security → 2-Step Verification → App passwords.</p>
-    <div class="grid2">
-      <label>Your email<input id="smtpUser" type="email" placeholder="you@gmail.com" autocomplete="username"></label>
-      <label>App password<input id="smtpPass" type="password" placeholder="16 characters" autocomplete="current-password"></label>
-      <label>From name<input id="smtpFromName" placeholder="Ozan"></label>
-      <label>SMTP host<input id="smtpHost" placeholder="smtp.gmail.com"></label>
-      <label>SMTP port<input id="smtpPort" type="number" placeholder="465"></label>
-      <label>IMAP host<input id="imapHost" placeholder="imap.gmail.com"></label>
-    </div>
-    <button id="btnTestSmtp">Save &amp; test connection</button>
-    <div id="smtpResult" class="muted"></div>
-    <p id="secretNote" class="hint"></p>
-  </div>
-
-  <div class="card">
-    <h2>Sending limits</h2>
-    <div class="grid2">
-      <label>Max sends per day<input id="dailyLimit" type="number" min="1"></label>
-      <label>Gap between sends (seconds)<span class="row"><input id="minGap" type="number" min="10"> <span class="muted">to</span> <input id="maxGap" type="number" min="10"></span></label>
-    </div>
-    <label class="check"><input id="footerEnabled" type="checkbox"> Append an opt-out footer to every email</label>
-    <textarea id="footerText" rows="3" placeholder="e.g. I'm Ozan at WearSide Labs, Durham. Reply 'no thanks' and I won't contact you again."></textarea>
-    <p class="hint">Off by default, as you asked. If you switch it on it's appended after your signature.</p>
-    <button id="btnSaveSending" class="secondary">Save limits</button>
-  </div>
-
-  <div class="card">
-    <h2>Never contact</h2>
-    <div class="row"><input id="supPattern" placeholder="someone@example.com or @example.com"><button id="btnSuppress" class="secondary">Add</button></div>
-    <p class="hint">Checked again at the moment of sending, not just when you approve. Domain entries start with @.</p>
-    <div id="supList"></div>
-  </div>
-</section>
-
-<!-- ───────────────────────────────── product -->
-<section id="tab-product" class="tab hidden">
-  <h1>Your product</h1>
-  <p class="lede">A short conversation. Answer like you'd tell a friend — no marketing language needed, and none will be used on you.</p>
-  <div id="interviewWrap" class="card">
-    <div id="chat" class="chat"></div>
-    <div class="row">
-      <textarea id="answer" rows="2" placeholder="Type your answer…"></textarea>
-      <button id="btnAnswer">Send</button>
-    </div>
-    <div class="row">
-      <button id="btnStartInterview" class="secondary">Start interview</button>
-      <button id="btnFinishInterview" class="secondary">Write the brief</button>
-    </div>
-  </div>
-  <div id="briefCard" class="card hidden">
-    <h2>The brief <span class="muted">— edit anything that's wrong</span></h2>
-    <div id="briefFields"></div>
-    <button id="btnSaveBrief" class="secondary">Save brief</button>
-  </div>
-</section>
-
-<!-- ───────────────────────────────── campaign -->
-<section id="tab-campaign" class="tab hidden">
-  <h1>Campaign</h1>
-  <div class="card">
-    <div class="row">
-      <select id="campaignSelect"></select>
-      <button id="btnNewCampaign" class="secondary">New campaign</button>
-    </div>
-    <div id="newCampaignForm" class="hidden">
-      <div class="grid2">
-        <label>Name<input id="cName" placeholder="Durham trades"></label>
-        <label>What do you want from this email?<input id="cGoal" placeholder="15 minutes to talk about rebuilding their website"></label>
-        <label>How to find companies<select id="cMode">
-          <option value="opencode_search">Search the web (free)</option>
-          <option value="manual">I'll paste a list</option>
-        </select></label>
-        <label>People per company<input id="cContacts" type="number" min="1" max="5" value="3"></label>
-      </div>
-      <label class="check"><input id="cInferred" type="checkbox"> Allow guessed addresses (first.last@) when nobody publishes one</label>
-      <button id="btnCreateCampaign">Create</button>
-    </div>
-  </div>
-
-  <div class="card" id="findCard">
-    <h2>Find companies</h2>
-    <div class="row">
-      <input id="extraTargeting" placeholder="Optional: extra targeting, e.g. 'within 20 miles of Durham'">
-      <button id="btnDiscover">Search the web</button>
-    </div>
-    <details><summary>Or paste a list</summary>
-      <textarea id="manualList" rows="4" placeholder="one per line:&#10;bethellandco.co.uk Bethell &amp; Co&#10;crdesignservices.co.uk"></textarea>
-      <button id="btnManual" class="secondary">Add these</button>
-    </details>
-  </div>
-
-  <div class="card">
-    <div class="row spread">
-      <h2>Companies <span class="muted" id="companyCount"></span></h2>
-      <span class="row">
-        <button id="btnSelectAll" class="secondary small">Tick all</button>
-        <button id="btnSelectNone" class="secondary small">Untick all</button>
-        <button id="btnRun">Research &amp; write emails</button>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg><use href="#i-send"/></svg>
       </span>
+      <span class="brand-name">coldcall</span>
     </div>
-    <p class="hint">Nothing is researched or written until you tick it. Ticking is the only thing that spends time.</p>
-    <div id="companyList"></div>
-  </div>
-</section>
 
-<!-- ───────────────────────────────── review -->
-<section id="tab-review" class="tab hidden">
-  <h1>Review</h1>
-  <p class="lede">Every personalised claim shows the page it came from and the exact quote. If it isn't cited, it wasn't allowed to be written.</p>
-  <div class="row"><select id="reviewFilter">
-    <option value="needs_review">Needs review</option>
-    <option value="approved">Approved</option>
-    <option value="sent">Sent</option>
-    <option value="all">All</option>
-  </select><span class="muted" id="draftCount"></span></div>
-  <div id="draftList"></div>
-</section>
+    <nav class="nav" id="nav" aria-label="Sections"></nav>
 
-<!-- ───────────────────────────────── send -->
-<section id="tab-send" class="tab hidden">
-  <h1>Send</h1>
-  <div class="card">
-    <div id="sendStats" class="stats"></div>
-    <div class="row">
-      <button id="btnSendStart">Start sending</button>
-      <button id="btnSendPause" class="secondary">Pause</button>
+    <div class="sidebar-foot">
+      <button class="health-row" id="healthBtn" type="button" title="System status">
+        <span class="dot" id="hDot"></span>
+        <span class="sidebar-foot-text" id="hText">starting…</span>
+      </button>
+      <button class="health-row" id="collapseBtn" type="button">
+        <svg width="14" height="14" aria-hidden="true"><use href="#i-menu"/></svg>
+        <span class="sidebar-foot-text">Collapse</span>
+      </button>
     </div>
-    <p class="hint">One email at a time with a randomised gap. The daily cap is counted from what actually left over the last 24 hours, so restarting won't get round it.</p>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb" id="crumb"></div>
+      <div class="topbar-spacer"></div>
+      <button class="searchbtn" id="searchBtn" type="button">
+        <svg aria-hidden="true"><use href="#i-search"/></svg>
+        <span>Search</span><kbd id="kbdHint">⌘K</kbd>
+      </button>
+      <button class="iconbtn" id="themeBtn" type="button" title="Theme" aria-label="Toggle theme">
+        <svg aria-hidden="true"><use href="#i-half-moon"/></svg>
+      </button>
+    </header>
+
+    <div id="banner" class="banner hidden" role="status"></div>
+    <div id="jobbar" class="jobbar hidden" role="status">
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="jobText"></span>
+      <span class="progress hidden" id="jobProgress"><i></i></span>
+    </div>
+
+    <main class="content" id="content" tabindex="-1"></main>
   </div>
-  <div class="card"><h2>Recent</h2><div id="sendLog"></div></div>
-</section>
+</div>
 
-<!-- ───────────────────────────────── replies -->
-<section id="tab-replies" class="tab hidden">
-  <h1>Replies</h1>
-  <div class="row"><button id="btnPoll">Check now</button><span class="muted">Checked automatically every 2 minutes.</span></div>
-  <div id="replyList"></div>
-</section>
-
-<!-- ───────────────────────────────── logs -->
-<section id="tab-logs" class="tab hidden">
-  <h1>Model calls</h1>
-  <div class="row"><label class="check"><input id="failedOnly" type="checkbox"> Failures only</label><button id="btnRefreshLogs" class="secondary">Refresh</button></div>
-  <div id="logList"></div>
-</section>
-</main>
-
-<div id="toast" class="toast hidden"></div>
-<script src="/app.js"></script>
+<div id="modal"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script src="/app.js" type="module"></script>
 </body>
 </html>

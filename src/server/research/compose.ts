@@ -10,8 +10,12 @@ import { ulid, now, tx, type Db } from "../db/index.ts";
 import * as P from "../llm/prompts.ts";
 import { briefOf } from "./pipeline.ts";
 import { getSetting, type SendingSettings } from "../db/settings.ts";
+import { checkQuality, countWords } from "./quality.ts";
 
-export interface ComposeResult { draftId: string; version: number; subject: string; body: string; usedClaims: number }
+export interface ComposeResult {
+  draftId: string; version: number; subject: string; body: string;
+  usedClaims: number; flags: string[];
+}
 
 /** Footer is OFF by default, by explicit instruction. Only appended when switched on. */
 export function renderBody(db: Db, body: string, product: any): string {
@@ -28,7 +32,7 @@ export async function composeDraft(
   deps: { db: Db; llm: LlmService },
   campaignCompanyId: string,
   contactId: string,
-  opts: { instruction?: string; priority?: "interactive" | "batch" } = {},
+  opts: { instruction?: string; priority?: "interactive" | "batch"; step?: number; followsSendId?: string; dueAt?: number } = {},
 ): Promise<ComposeResult> {
   const { db, llm } = deps;
   const cc = db.prepare("SELECT * FROM campaign_company WHERE id=?").get(campaignCompanyId) as any;
@@ -63,13 +67,16 @@ export async function composeDraft(
   const valid = new Set(claims.map((c) => c.id));
 
   return tx(db, () => {
-    let draft = db.prepare("SELECT * FROM email_draft WHERE campaign_id=? AND contact_id=?")
-      .get(campaign.id, contactId) as any;
+    const step = opts.step ?? 1;
+    let draft = db.prepare("SELECT * FROM email_draft WHERE campaign_id=? AND contact_id=? AND step_number=?")
+      .get(campaign.id, contactId, step) as any;
     if (!draft) {
       const id = ulid();
       db.prepare(
-        "INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,created_at,updated_at) VALUES (?,?,?,?,'needs_review',?,?)",
-      ).run(id, campaign.id, campaignCompanyId, contactId, now(), now());
+        `INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,step_number,
+           follows_send_id,due_at,created_at,updated_at) VALUES (?,?,?,?,'needs_review',?,?,?,?,?)`,
+      ).run(id, campaign.id, campaignCompanyId, contactId, step,
+            opts.followsSendId ?? null, opts.dueAt ?? null, now(), now());
       draft = { id };
     }
     const maxV = db.prepare("SELECT COALESCE(MAX(version),0) v FROM email_draft_version WHERE draft_id=?").get(draft.id) as { v: number };
@@ -84,11 +91,18 @@ export async function composeDraft(
       }));
       const version = maxV.v + i + 1;
       const versionId = ulid();
+      const rendered = renderBody(db, v.body, product);
+      const flags = checkQuality({ subject: v.subject, body: v.body, citedClaims: used.length });
       db.prepare(
-        "INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,llm_call_id,edit_note,personalization,created_at) VALUES (?,?,?,?,?,'llm',?,?,?,?)",
-      ).run(versionId, draft.id, version, v.subject.trim(), renderBody(db, v.body, product),
-            r.meta.llmCallId, opts.instruction ?? null, JSON.stringify(personalization), now());
-      if (!firstResult) firstResult = { draftId: draft.id, version, subject: v.subject.trim(), body: v.body, usedClaims: used.length };
+        `INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,llm_call_id,
+           edit_note,personalization,word_count,quality_flags,created_at) VALUES (?,?,?,?,?,'llm',?,?,?,?,?,?)`,
+      ).run(versionId, draft.id, version, v.subject.trim(), rendered,
+            r.meta.llmCallId, opts.instruction ?? null, JSON.stringify(personalization),
+            countWords(v.body), JSON.stringify(flags), now());
+      if (!firstResult) firstResult = {
+        draftId: draft.id, version, subject: v.subject.trim(), body: v.body,
+        usedClaims: used.length, flags: flags.map((f) => f.flag),
+      };
     });
 
     db.prepare("UPDATE email_draft SET status='needs_review', updated_at=? WHERE id=?").run(now(), draft.id);
@@ -102,9 +116,14 @@ export function saveHumanEdit(db: Db, draftId: string, subject: string, body: st
   return tx(db, () => {
     const maxV = db.prepare("SELECT COALESCE(MAX(version),0) v FROM email_draft_version WHERE draft_id=?").get(draftId) as { v: number };
     const version = maxV.v + 1;
+    // A human edit is checked too, but the citation flag is not applied: the person writing it
+    // owns what they wrote, and we did not give them claim ids to cite.
+    const flags = checkQuality({ subject, body, citedClaims: 1 });
     db.prepare(
-      "INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,edit_note,personalization,created_at) VALUES (?,?,?,?,?,'human',?,'[]',?)",
-    ).run(ulid(), draftId, version, subject, body, note ?? null, now());
+      `INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,edit_note,
+         personalization,word_count,quality_flags,created_at) VALUES (?,?,?,?,?,'human',?,'[]',?,?,?)`,
+    ).run(ulid(), draftId, version, subject, body, note ?? null,
+          countWords(body), JSON.stringify(flags), now());
     db.prepare("UPDATE email_draft SET updated_at=? WHERE id=?").run(now(), draftId);
     return version;
   });
