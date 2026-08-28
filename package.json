@@ -1,0 +1,27 @@
+{
+  "name": "coldcall",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first cold email system powered by opencode as a free LLM backend",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify:sandbox": "node scripts/verify-sandbox.ts",
+    "verify:llm": "node scripts/verify-llm.ts",
+    "verify:pipeline": "node scripts/verify-pipeline.ts",
+    "start": "node bin/coldcall.js"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "cheerio": "^1.2.0",
+    "imapflow": "^1.7.6",
+    "nodemailer": "^9.0.6"
+  },
+  "bin": {
+    "coldcall": "bin/coldcall.js"
+  }
+}
