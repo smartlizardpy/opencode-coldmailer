@@ -28,6 +28,7 @@ export interface DashboardStats {
   sentLast7d: number;
   replyRate: number | null;
   repliesUnhandled: number;
+  bounces: number;
   deliverabilityIssues: number;
   followUpsDue: number;
   suppressed: number;
@@ -60,7 +61,8 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     drafted: one(db, `SELECT COUNT(*) c FROM email_draft WHERE status NOT IN ('discarded') ${scope}`, ...arg),
     approved: one(db, `SELECT COUNT(*) c FROM email_draft WHERE status='approved' ${scope}`, ...arg),
     sent: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' ${scope}`, ...arg),
-    replied: one(db, `SELECT COUNT(*) c FROM reply ${campaignId ? "WHERE campaign_id=?" : ""}`, ...arg),
+    // People, not machines. A bounce in the "replied" number would make the funnel lie.
+    replied: one(db, `SELECT COUNT(*) c FROM reply WHERE kind='reply' ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
   };
 
   // Buckets are LOCAL days. toISOString() would convert local midnight to UTC and label the
@@ -76,7 +78,7 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     sendsByDay.push({
       day: localDay(start),
       sent: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? AND sent_at<? ${scope}`, from, to, ...arg),
-      replies: one(db, `SELECT COUNT(*) c FROM reply WHERE received_at>=? AND received_at<? ${campaignId ? "AND campaign_id=?" : ""}`, from, to, ...arg),
+      replies: one(db, `SELECT COUNT(*) c FROM reply WHERE kind='reply' AND received_at>=? AND received_at<? ${campaignId ? "AND campaign_id=?" : ""}`, from, to, ...arg),
     });
   }
 
@@ -89,7 +91,15 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     `SELECT * FROM (
        SELECT sent_at at, 'sent' kind, 'Sent to ' || to_email text FROM send_log WHERE status='sent' AND sent_at IS NOT NULL ${scope}
        UNION ALL
-       SELECT received_at at, 'reply' kind, 'Reply from ' || from_email text FROM reply ${campaignId ? "WHERE campaign_id=?" : ""}
+       SELECT received_at at,
+              CASE WHEN kind='reply' THEN 'reply' ELSE 'failed' END kind,
+              CASE kind
+                WHEN 'reply'       THEN 'Reply from ' || from_email
+                WHEN 'auto_reply'  THEN 'Auto-reply from ' || from_email
+                ELSE 'Bounced: ' || COALESCE(bounced_recipient, from_email)
+                   || COALESCE(' (' || bounce_status || ')', '')
+              END text
+       FROM reply ${campaignId ? "WHERE campaign_id=?" : ""}
        UNION ALL
        SELECT created_at at, 'failed' kind, 'Model call failed: ' || COALESCE(error_code,'?') text FROM llm_call WHERE ok=0
      ) ORDER BY at DESC LIMIT 12`).all(...arg, ...arg) as Array<{ at: number; kind: string; text: string }>;
@@ -104,7 +114,8 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     sentLast24h: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? ${scope}`, Date.now() - 24 * 3600_000, ...arg),
     sentLast7d: one(db, `SELECT COUNT(*) c FROM send_log WHERE status='sent' AND sent_at>=? ${scope}`, Date.now() - 7 * 24 * 3600_000, ...arg),
     replyRate: sent > 0 ? funnel.replied / sent : null,
-    repliesUnhandled: one(db, `SELECT COUNT(*) c FROM reply WHERE handled=0 ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
+    repliesUnhandled: one(db, `SELECT COUNT(*) c FROM reply WHERE handled=0 AND kind='reply' ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
+    bounces: one(db, `SELECT COUNT(*) c FROM reply WHERE kind IN ('bounce_hard','bounce_soft') ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
     // Read from the cached DNS audit only. A stats poll must never block on the network.
     deliverabilityIssues: auditIssueCount(),
     followUpsDue: 0,        // filled by the route, which has the sequence module

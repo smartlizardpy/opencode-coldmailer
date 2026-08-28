@@ -9,7 +9,7 @@ import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/
 import { verifySmtp, sendMail, newMessageId, GMAIL_PRESET } from "../mail/smtp.ts";
 import { auditCached, scoreMessage, warmAudit } from "../mail/deliverability.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
-import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
+import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress, SUPPRESSION_REASONS } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
 import { parseCompanyList } from "../research/importList.ts";
 import { composeDraft, saveHumanEdit, renderedBody, productForDraft } from "../research/compose.ts";
@@ -70,7 +70,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
       },
       sending: { ...guards, running: app.sender.isRunning, lastOutcome: app.sender.lastOutcome, nextSendAt: app.sender.nextSendAt },
       review: { needsReview: (db.prepare("SELECT COUNT(*) c FROM email_draft WHERE status='needs_review'").get() as any).c },
-      replies: { unhandled: (db.prepare("SELECT COUNT(*) c FROM reply WHERE handled=0").get() as any).c },
+      replies: { unhandled: (db.prepare("SELECT COUNT(*) c FROM reply WHERE handled=0 AND kind='reply'").get() as any).c },
       jobs: [...app.busy.entries()].map(([key, v]) => ({ key, ...v })),
       queue: app.llm.queue.stats(),
       ok: app.supervisor.status === "ready" && slots.writing.status === "ok",
@@ -710,7 +710,13 @@ export function registerRoutes(r: Router, app: AppContext): void {
   r.post("/api/suppression", ({ body }: RouteCtx) => {
     const raw = String(body.pattern ?? "").trim();
     if (!raw) throw bad("enter an address or @domain");
-    suppress(db, raw, body.reason ?? "manual", body.note);
+    // Validated at the boundary so a bad request is a 400, not a 500 from the guard inside
+    // suppress(). The UI only ever sends these, but the API is reachable without it.
+    const reason = body.reason ?? "manual";
+    if (!SUPPRESSION_REASONS.includes(reason)) {
+      throw bad(`reason must be one of: ${SUPPRESSION_REASONS.join(", ")}`);
+    }
+    suppress(db, raw, reason, body.note);
     return { ok: true };
   });
   r.post("/api/suppression/:id/delete", ({ params }: RouteCtx) => {

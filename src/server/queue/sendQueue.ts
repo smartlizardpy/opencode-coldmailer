@@ -34,8 +34,20 @@ export function isSuppressed(db: Db, email: string): { suppressed: boolean; reas
   return row ? { suppressed: true, reason: `${row.pattern} (${row.reason})` } : { suppressed: false };
 }
 
-export function suppress(db: Db, pattern: string, reason: string, note?: string): void {
+/** The reasons the schema accepts. Anything else is a typo, and used to fail silently. */
+export const SUPPRESSION_REASONS = ["unsubscribe", "bounce", "manual", "competitor", "customer"] as const;
+export type SuppressionReason = (typeof SUPPRESSION_REASONS)[number];
+
+export function suppress(db: Db, pattern: string, reason: SuppressionReason, note?: string): void {
   const p = pattern.trim().toLowerCase();
+  if (!p) throw new Error("suppress: empty pattern");
+  // Checked here rather than left to the column's CHECK, because the INSERT below is
+  // OR IGNORE - which exists so re-suppressing an address is a no-op, but which also
+  // swallowed a bad reason without a word. A hard bounce silently failing to suppress is
+  // exactly the failure this whole path exists to prevent, and it looks like success.
+  if (!SUPPRESSION_REASONS.includes(reason)) {
+    throw new Error(`suppress: unknown reason "${reason}" (expected ${SUPPRESSION_REASONS.join(", ")})`);
+  }
   db.prepare("INSERT OR IGNORE INTO suppression (id,pattern,kind,reason,note,created_at) VALUES (?,?,?,?,?,?)")
     .run(ulid(), p, p.startsWith("@") ? "domain" : "email", reason, note ?? null, now());
 }
@@ -73,7 +85,9 @@ export function approveDraft(db: Db, draftId: string): void {
  * replies never receives another cold email, so it has to hold at the moment of sending too.
  */
 export function hasReplied(db: Db, contactId: string): boolean {
-  return !!db.prepare("SELECT 1 FROM reply WHERE contact_id = ? LIMIT 1").get(contactId);
+  // kind matters: a bounce and an out-of-office both land in this table, and neither is
+  // someone declining to be contacted again. Blocking on them would silently drop the lead.
+  return !!db.prepare("SELECT 1 FROM reply WHERE contact_id = ? AND kind = 'reply' LIMIT 1").get(contactId);
 }
 
 /**

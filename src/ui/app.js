@@ -924,10 +924,51 @@ function sequenceDialog(seq) {
 
 /* ───────────────────────────────────────────────────────── replies */
 
+const BOUNCE_TEXT = {
+  "5.1.1": "the mailbox does not exist",
+  "5.1.2": "the domain does not exist",
+  "5.1.3": "the address is malformed",
+  "5.2.1": "the mailbox is disabled",
+  "5.2.2": "the mailbox is full",
+  "5.4.4": "the domain cannot be routed to",
+  "5.7.1": "the receiving server refused it on policy grounds",
+};
+
+/** The machine mail, kept apart from the people. */
+function machineRow(r) {
+  const bounced = r.kind === "bounce_hard" || r.kind === "bounce_soft";
+  const why = BOUNCE_TEXT[r.bounce_status] ?? (r.kind === "bounce_soft" ? "a temporary failure" : "the delivery failed");
+  return `<div class="feed-item">
+    <span class="feed-icon ${r.kind === "bounce_hard" ? "bad" : "warn"}">${icon(bounced ? "warning-triangle" : "clock")}</span>
+    <span>
+      <b>${esc(bounced ? (r.bounced_recipient ?? r.contact_email ?? r.from_email) : r.from_email)}</b>
+      ${bounced ? ` — ${esc(why)}` : " sent an automatic reply"}
+      ${r.bounce_status ? `<span class="tag" style="margin-left:6px">${esc(r.bounce_status)}</span>` : ""}
+      ${r.company ? `<div class="cellsub">${esc(r.company)}</div>` : ""}
+    </span>
+    <span class="feed-time">${esc(ago(r.received_at))}</span>
+  </div>`;
+}
+
 async function renderReplies() {
-  S.replies = await api("/api/replies");
+  const all = await api("/api/replies");
+  // A bounce is not a reply. Mixing them puts "MAILER-DAEMON" in a list the user reads as
+  // people who answered, and hides the one thing a bounce actually needs: being noticed.
+  S.replies = all.filter((r) => (r.kind ?? "reply") === "reply");
+  const machine = all.filter((r) => (r.kind ?? "reply") !== "reply");
+  const hardBounces = machine.filter((r) => r.kind === "bounce_hard").length;
+
+  const machineCard = machine.length ? `<div class="card">
+    <div class="card-head"><h2>Delivery problems and automatic replies</h2>
+      <span class="cellsub">${num(machine.length)} message${machine.length === 1 ? "" : "s"} from mail systems, not from people.</span></div>
+    <div class="feed">${machine.slice(0, 25).map(machineRow).join("")}</div>
+    ${hardBounces ? `<p class="card-note" style="margin-top:var(--s3)">
+      Addresses that came back as non-existent were added to the never-contact list automatically.
+      Continuing to mail a dead mailbox is what costs you a sending reputation.</p>` : ""}
+  </div>` : "";
+
   $("#content").innerHTML = page(
-    S.replies.length ? `<div class="stagger">${S.replies.map((r) => `
+    (S.replies.length ? `<div class="stagger">${S.replies.map((r) => `
       <div class="card" id="rp-${esc(r.id)}">
         <div class="card-head">
           <h2>${esc(r.company ?? r.from_email)}</h2>
@@ -948,9 +989,9 @@ async function renderReplies() {
         </div>
         <div id="rd-${esc(r.id)}"></div>
       </div>`).join("")}</div>`
-    : empty("message-text", "No replies yet",
+    : machine.length ? "" : empty("message-text", "No replies yet",
         "Replies are matched to the thread they answer, using the Message-ID we set before sending.",
-        `<button class="btn ghost" id="btnPoll">${icon("refresh")} Check now</button>`),
+        `<button class="btn ghost" id="btnPoll">${icon("refresh")} Check now</button>`)) + machineCard,
     `<button class="btn ghost" id="btnPollTop">${icon("refresh")} Check now</button>`);
 
   const poll = async () => { try { await api("/api/replies/poll", {}); toast("Checking the mailbox…"); } catch (e) { fail(e); } };

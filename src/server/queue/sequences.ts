@@ -73,7 +73,8 @@ export function dueFollowUps(db: Db, campaignId?: string, limit = 100): DueFollo
      WHERE s.status = 'sent'
        ${campaignId ? "AND s.campaign_id = ?" : ""}
        -- never follow up someone who answered
-       AND NOT EXISTS (SELECT 1 FROM reply r WHERE r.contact_id = s.contact_id)
+       AND NOT EXISTS (SELECT 1 FROM reply r WHERE r.contact_id = s.contact_id
+                         AND r.kind IN ('reply','bounce_hard'))
        -- only the latest step we actually sent to this person
        AND d.step_number = (SELECT MAX(d2.step_number) FROM email_draft d2
                             JOIN send_log s2 ON s2.draft_id = d2.id AND s2.status='sent'
@@ -115,7 +116,8 @@ export function upcomingFollowUps(db: Db, campaignId: string, limit = 50): Array
      JOIN campaign_company cc ON cc.id = d.campaign_company_id
      JOIN company co ON co.id = cc.company_id
      WHERE s.status='sent' AND s.campaign_id=?
-       AND NOT EXISTS (SELECT 1 FROM reply r WHERE r.contact_id = s.contact_id)
+       AND NOT EXISTS (SELECT 1 FROM reply r WHERE r.contact_id = s.contact_id
+                         AND r.kind IN ('reply','bounce_hard'))
      ORDER BY s.sent_at DESC`).all(campaignId) as any[];
   const out: Array<{ email: string; company: string; step: number; dueAt: number }> = [];
   const seen = new Set<string>();

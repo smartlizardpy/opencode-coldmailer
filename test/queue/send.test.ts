@@ -167,3 +167,48 @@ test("approving again clears a pending backoff - it means 'try this now'", () =>
   assert.equal(row.error_code, null);
   assert.equal(nextApprovedDraftId(db), d);
 });
+
+test("suppress rejects a reason the schema would silently drop", () => {
+  // The INSERT is OR IGNORE so re-suppressing an address is a no-op. That also meant a
+  // misspelled reason inserted nothing and reported success - which is how "bounced" instead
+  // of "bounce" left every hard-bounced address un-suppressed while the code read as if it
+  // had worked. Found by running the bounce path, not by reading it.
+  const { db } = world();
+  assert.throws(() => suppress(db, "a@x.com", "bounced" as never), /unknown reason/);
+  assert.equal((db.prepare("SELECT COUNT(*) c FROM suppression").get() as any).c, 0);
+
+  suppress(db, "a@x.com", "bounce", "5.1.1");
+  assert.equal(isSuppressed(db, "a@x.com").suppressed, true);
+});
+
+test("suppress is idempotent, and case-insensitive", () => {
+  const { db } = world();
+  suppress(db, "a@x.com", "bounce");
+  suppress(db, "A@X.com", "manual");
+  assert.equal((db.prepare("SELECT COUNT(*) c FROM suppression").get() as any).c, 1);
+  assert.equal(isSuppressed(db, "A@x.COM").suppressed, true);
+});
+
+test("suppress refuses an empty pattern", () => {
+  const { db } = world();
+  assert.throws(() => suppress(db, "   ", "manual"), /empty pattern/);
+});
+
+test("a bounce does not count as the person replying", () => {
+  // hasReplied gates every further send to a contact. Counting a bounce or an out-of-office
+  // as a reply silently drops the lead - and counting a bounce means the dead address is
+  // never suppressed either, so other campaigns keep mailing it.
+  const { db, ids } = world();
+  const t = now();
+  const insert = (kind: string) =>
+    db.prepare(`INSERT INTO reply (id,campaign_id,contact_id,from_email,subject,body_text,received_at,handled,created_at,kind)
+                VALUES (?,?,?,?,?,?,?,0,?,?)`)
+      .run(ulid(), ids.c, ids.ct, "d@x.com", "s", "", t, t, kind);
+
+  insert("bounce_hard");
+  assert.equal(hasReplied(db, ids.ct), false, "a bounce is not a reply");
+  insert("auto_reply");
+  assert.equal(hasReplied(db, ids.ct), false, "an out-of-office is not a reply");
+  insert("reply");
+  assert.equal(hasReplied(db, ids.ct), true, "a person answering is");
+});
