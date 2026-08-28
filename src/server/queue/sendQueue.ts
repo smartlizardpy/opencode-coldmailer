@@ -62,6 +62,33 @@ export function approveDraft(db: Db, draftId: string): void {
     .run(now(), now(), draftId);
 }
 
+/**
+ * Has this person already answered us?
+ *
+ * dueFollowUps checks this when it generates a step, but a draft can also be approved by hand,
+ * and a reply can arrive between approving and sending. The promise is that someone who
+ * replies never receives another cold email, so it has to hold at the moment of sending too.
+ */
+export function hasReplied(db: Db, contactId: string): boolean {
+  return !!db.prepare("SELECT 1 FROM reply WHERE contact_id = ? LIMIT 1").get(contactId);
+}
+
+/**
+ * Is an SMTP failure worth trying again?
+ *
+ * A 4xx is the server saying "not now" (greylisting, rate limit, temporary local error) and a
+ * connection error is the network. Failing the draft permanently for either would silently
+ * drop a perfectly good email, which is exactly the mistake the page fetcher used to make.
+ * A 5xx is the server saying "no" - a bad address or a rejected message - and must not loop.
+ */
+export function isTransientSmtpError(e: unknown): boolean {
+  const code = (e as { responseCode?: number })?.responseCode;
+  if (typeof code === "number") return code >= 400 && code < 500;
+  const msg = String((e as Error)?.message ?? e).toLowerCase();
+  if (/(^|\D)5\d\d(\D|$)|invalid recipient|no such user|mailbox unavailable|authentication|auth failed|username and password/.test(msg)) return false;
+  return /timeout|econnreset|econnrefused|etimedout|ehostunreach|enetunreach|socket|connection|greylist|try again|temporar/.test(msg);
+}
+
 export type SendOutcome =
   | { sent: true; sendLogId: string; messageId: string }
   | { sent: false; reason: string; code: string };
@@ -83,6 +110,12 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
     db.prepare("UPDATE email_draft SET status='discarded', error_code='SUPPRESSED', error_message=?, updated_at=? WHERE id=?")
       .run(sup.reason ?? "suppressed", now(), draftId);
     return { sent: false, reason: `suppressed: ${sup.reason}`, code: "SUPPRESSED" };
+  }
+
+  if (hasReplied(db, d.contact_id)) {
+    db.prepare("UPDATE email_draft SET status='discarded', error_code='ALREADY_REPLIED', error_message=?, updated_at=? WHERE id=?")
+      .run("they replied - the sequence stops here", now(), draftId);
+    return { sent: false, reason: "they have already replied - not sending another", code: "ALREADY_REPLIED" };
   }
 
   const dupe = contactedElsewhere(db, d.contact_id, d.campaign_id);
@@ -124,11 +157,23 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
     return { sent: true, sendLogId, messageId };
   } catch (e) {
     const msg = (e as Error).message.slice(0, 500);
+    const transient = isTransientSmtpError(e);
     tx(db, () => {
-      db.prepare("UPDATE send_log SET status='failed', error_code='SMTP_ERROR', error_message=? WHERE id=?").run(msg, sendLogId);
-      db.prepare("UPDATE email_draft SET status='failed', error_code='SMTP_ERROR', error_message=?, updated_at=? WHERE id=?").run(msg, now(), draftId);
+      // The failed send_log row does not block a retry: the one-live-send index only covers
+      // queued/sending/sent.
+      db.prepare("UPDATE send_log SET status='failed', error_code=?, error_message=? WHERE id=?")
+        .run(transient ? "SMTP_TEMPORARY" : "SMTP_ERROR", msg, sendLogId);
+      if (transient) {
+        // Leave it approved so the runner picks it up again rather than losing a good email
+        // to a greylist or a dropped connection.
+        db.prepare("UPDATE email_draft SET error_code='SMTP_TEMPORARY', error_message=?, updated_at=? WHERE id=?")
+          .run(msg, now(), draftId);
+      } else {
+        db.prepare("UPDATE email_draft SET status='failed', error_code='SMTP_ERROR', error_message=?, updated_at=? WHERE id=?")
+          .run(msg, now(), draftId);
+      }
     });
-    return { sent: false, reason: msg, code: "SMTP_ERROR" };
+    return { sent: false, reason: transient ? `temporary: ${msg}` : msg, code: transient ? "SMTP_TEMPORARY" : "SMTP_ERROR" };
   }
 }
 
