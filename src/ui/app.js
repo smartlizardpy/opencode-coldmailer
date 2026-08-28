@@ -1409,10 +1409,14 @@ async function loadHealth() {
     S.health = h;
     const dot = $("#hDot"), text = $("#hText"), banner = $("#banner");
     const oc = h.opencode.status;
+    // While the probe runs we do not yet know whether a model exists, so saying "no model"
+    // contradicts the "Probing models" bar directly below it.
+    const probing = (h.jobs ?? []).some((j) => j.key === "probe");
     let cls = "dot", label = "";
     if (oc === "not_installed") { cls = "dot bad"; label = "opencode missing"; }
     else if (oc === "starting") { cls = "dot warn pulse"; label = "starting opencode…"; }
     else if (oc !== "ready") { cls = "dot bad"; label = `opencode ${oc}`; }
+    else if (probing) { cls = "dot warn pulse"; label = "checking models…"; }
     else if (h.model.writing.status !== "ok") { cls = "dot warn"; label = "no model"; }
     else if (!h.smtp.configured) { cls = "dot warn"; label = "mailbox not set up"; }
     else { cls = "dot ok"; label = "all systems ready"; }
@@ -1422,7 +1426,7 @@ async function loadHealth() {
       banner.className = "banner";
       banner.innerHTML = `${icon("warning-triangle")} opencode isn't installed. Run
         <code class="mono">curl -fsSL https://opencode.ai/install | bash</code> then restart coldcall.`;
-    } else if (oc === "ready" && h.model.writing.status !== "ok") {
+    } else if (oc === "ready" && h.model.writing.status !== "ok" && !probing) {
       banner.className = "banner warn";
       banner.innerHTML = `${icon("warning-triangle")} No usable model. Run
         <code class="mono">opencode auth login</code> in a terminal, then re-probe.
