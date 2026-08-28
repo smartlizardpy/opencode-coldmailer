@@ -200,3 +200,57 @@ t2("a Cloudflare address survives a cache round-trip", async () => {
   assert.deepEqual(c.emails, ["bilgi@x.com"], "re-deriving from text alone would lose it");
   assert.equal(c.hasForm, true);
 });
+
+t2("prefetch crawls several hosts at once but still serialises each host", async () => {
+  const { openDb } = await import("../../src/server/db/index.ts");
+  const { migrate } = await import("../../src/server/db/migrate.ts");
+  const { ulid, now } = await import("../../src/server/db/index.ts");
+  const { Fetcher } = await import("../../src/server/research/fetcher.ts");
+  const { prefetchCompanies } = await import("../../src/server/research/pipeline.ts");
+
+  // One server, but each company points at a distinct hostname alias of it.
+  let inFlight = 0, peak = 0;
+  const server = createServer(async (_req, res) => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 120));
+    inFlight--;
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body><p>hello</p></body></html>");
+  });
+  // Bind to every loopback address, not just 127.0.0.1, so the 127.0.0.x aliases below connect.
+  await new Promise<void>((r) => server.listen(0, "0.0.0.0", r));
+  const port = (server.address() as { port: number }).port;
+
+  const db = openDb(":memory:"); migrate(db);
+  const t = now(), p = ulid(), c = ulid();
+  db.prepare("INSERT INTO product (id,name,created_at,updated_at) VALUES (?,?,?,?)").run(p, "P", t, t);
+  db.prepare("INSERT INTO campaign (id,product_id,name,created_at,updated_at) VALUES (?,?,?,?,?)").run(c, p, "C", t, t);
+  const ccIds: string[] = [];
+  // 127.0.0.x are distinct hosts to the per-domain throttle, and all route to the same server.
+  for (let i = 1; i <= 4; i++) {
+    const co = ulid(), cc = ulid();
+    db.prepare("INSERT INTO company (id,domain,name,website_url,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run(co, `127.0.0.${i}`, `C${i}`, `http://127.0.0.${i}:${port}/`, t, t);
+    db.prepare("INSERT INTO campaign_company (id,campaign_id,company_id,created_at,updated_at) VALUES (?,?,?,?,?)")
+      .run(cc, c, co, t, t);
+    ccIds.push(cc);
+  }
+  try {
+    const deps = { db, llm: null as never, fetcher: new Fetcher({ respectRobots: false }) };
+    const r = await prefetchCompanies(deps, ccIds, 4);
+    assert.equal(r.crawled, 4);
+    assert.ok(peak > 1, `hosts should overlap; peak concurrency was ${peak}`);
+  } finally { server.close(); }
+});
+
+t2("an address found only in HTML (not the visible text) is still accepted as on-site", () => {
+  // The regression: findContacts validated candidates against page TEXT only, which rejects
+  // every Cloudflare-obfuscated and JSON-LD address - the ones hardest to find in the first place.
+  const hex = "9afeffe9eefff1daf2fbf8ffe8e3fbe0f3f6f3f7f3b4f9f5f7";
+  const html = `<html><body><p>Bize ulasin</p>
+    <span class="__cf_email__" data-cfemail="${hex}">[email&#160;protected]</span></body></html>`;
+  const p = xp(html, "https://x.com/iletisim");
+  assert.deepEqual(p.emails, ["destek@haberyazilimi.com"]);
+  assert.ok(!p.text.includes("destek@haberyazilimi.com"),
+    "the address is deliberately absent from the visible text - that is the whole point of the obfuscation");
+});

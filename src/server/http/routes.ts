@@ -9,7 +9,7 @@ import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/
 import { verifySmtp, GMAIL_PRESET } from "../mail/smtp.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
-import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, briefOf } from "../research/pipeline.ts";
+import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
 import { composeDraft, saveHumanEdit } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
 import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
@@ -318,6 +318,15 @@ export function registerRoutes(r: Router, app: AppContext): void {
       const summary = { companies: rows.length, enriched: 0, contacts: 0, drafts: 0, failures: [] as string[] };
 
       db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), params.id);
+
+      // Fetch every selected company's pages first, several hosts at a time. The model stages
+      // below are serialised anyway, so this is where the wall-clock actually comes back.
+      app.bus.emit("run:progress", { campaignId: params.id, index: 0, total: rows.length, stage: "fetching sites" });
+      await prefetchCompanies({ db, llm: app.llm, fetcher: app.fetcher }, rows.map((r) => r.id), 4,
+        (doneN, total) => app.bus.emit("run:progress", {
+          campaignId: params.id, index: doneN, total, stage: "fetching sites",
+        }));
+
       for (const [i, row] of rows.entries()) {
         const co = db.prepare("SELECT co.name FROM campaign_company cc JOIN company co ON co.id=cc.company_id WHERE cc.id=?").get(row.id) as { name: string };
         app.bus.emit("run:progress", { campaignId: params.id, index: i + 1, total: rows.length, company: co?.name, stage: "researching" });

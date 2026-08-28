@@ -223,6 +223,42 @@ export async function crawlCompany(deps: PipelineDeps, companyId: string, maxPag
   return out;
 }
 
+/**
+ * Crawl several companies at once, before the LLM stages need them.
+ *
+ * The per-domain throttle in Fetcher already serialises requests to any single host, so running
+ * different hosts concurrently is polite and is where nearly all the wall-clock goes: the LLM
+ * lanes are serialised by design, but there is no reason a company should wait for the previous
+ * company's model call before its pages are even fetched.
+ *
+ * Failures are swallowed on purpose - this is a warm-up. Whatever it misses, enrichCompany
+ * fetches again for real and reports properly.
+ */
+export async function prefetchCompanies(
+  deps: PipelineDeps, campaignCompanyIds: string[], concurrency = 4,
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ crawled: number; failed: number }> {
+  const rows = campaignCompanyIds.map((id) =>
+    deps.db.prepare("SELECT company_id FROM campaign_company WHERE id=?").get(id) as { company_id: string } | undefined,
+  ).filter((r): r is { company_id: string } => !!r);
+
+  let done = 0, crawled = 0, failed = 0;
+  const queue = [...rows];
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const row = queue.shift();
+      if (!row) return;
+      try {
+        const pages = await crawlCompany(deps, row.company_id);
+        if (pages.length > 0) crawled++; else failed++;
+      } catch { failed++; }
+      onProgress?.(++done, rows.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+  return { crawled, failed };
+}
+
 export interface EnrichResult {
   pages: number; claims: number; verified: number; rejected: string[];
   recheck?: { actual_name: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string };
@@ -370,6 +406,15 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
 
   const pageByUrl = new Map(pages.map((p) => [normalizeUrl(p.url), p]));
   const allText = pages.map((p) => p.text).join("\n").toLowerCase();
+  /**
+   * An address counts as "seen on the site" if it is in the visible text OR in what the
+   * extractor pulled from the HTML. Checking the text alone was silently rejecting every
+   * Cloudflare-obfuscated and JSON-LD address - exactly the ones that are hardest to find and
+   * that the extractor was just taught to read.
+   */
+  const seenOnSite = new Set(allCrawlerEmails.map((e) => e.toLowerCase()));
+  const appearsOnSite = (email: string): boolean =>
+    seenOnSite.has(email.toLowerCase()) || allText.includes(email.toLowerCase());
   const wanted = campaign.contacts_per_company ?? 3;
   const candidates = [...(r.value.contacts ?? [])];
 
@@ -412,7 +457,7 @@ export async function findContacts(deps: PipelineDeps, campaignCompanyId: string
 
       if (email) {
         // The model may only report an address that literally appears on a page we fetched.
-        if (!allText.includes(email)) {
+        if (!appearsOnSite(email)) {
           notes.push(`dropped ${email} - does not appear on any page we fetched`);
           continue;
         }
