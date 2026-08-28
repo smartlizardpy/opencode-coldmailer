@@ -5,9 +5,11 @@
  * sent to a real person.
  */
 import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 
 const AjvCtor = ((Ajv as unknown as { default?: typeof Ajv }).default ?? Ajv) as typeof Ajv;
+const addFormatsFn = ((addFormats as unknown as { default?: typeof addFormats }).default ?? addFormats);
 
 const ajv = new AjvCtor({
   allErrors: true,
@@ -16,6 +18,13 @@ const ajv = new AjvCtor({
   removeAdditional: false,
   useDefaults: false,
 });
+
+/**
+ * Without this, `format: "uri"` is silently ignored and any string passes - which for a
+ * source_url would mean the citation guarantee rests on a constraint that does nothing.
+ * A schema that declares a format now actually gets it.
+ */
+addFormatsFn(ajv);
 
 const cache = new Map<string, ValidateFunction>();
 
