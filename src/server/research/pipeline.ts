@@ -225,20 +225,36 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
   const company = db.prepare("SELECT * FROM company WHERE id = ?").get(cc.company_id) as any;
   db.prepare("UPDATE campaign_company SET status='enriching', updated_at=? WHERE id=?").run(now(), campaignCompanyId);
 
-  const pages = await crawlCompany(deps, company.id);
+  let pages: CrawledPage[];
+  try {
+    pages = await crawlCompany(deps, company.id);
+  } catch (e) {
+    // 'enriching' is not a terminal state. Leaving a row in it hides the company from every
+    // status filter and it silently never gets picked up again.
+    db.prepare("UPDATE campaign_company SET status='failed', error_code='CRAWL_ERROR', error_message=?, updated_at=? WHERE id=?")
+      .run((e as Error).message.slice(0, 300), now(), campaignCompanyId);
+    throw e;
+  }
   if (pages.length === 0) {
     db.prepare("UPDATE campaign_company SET status='failed', error_code='NO_PAGES', error_message=?, updated_at=? WHERE id=?")
       .run("could not fetch any page from this site", now(), campaignCompanyId);
     return { pages: 0, claims: 0, verified: 0, rejected: ["site unreachable"] };
   }
 
-  const r = await llm.run<{ summary: string; industry?: string; city?: string; claims: Array<{ claim: string; source_url: string; quote: string }> }>({
-    task: "contact.extract",
-    system: P.ENRICH_SYSTEM,
-    prompt: P.enrichPrompt({ name: company.name, domain: company.domain }, pages),
-    schema: P.ENRICH_SCHEMA,
-    subject: { type: "campaign_company", id: campaignCompanyId },
-  });
+  let r;
+  try {
+    r = await llm.run<{ summary: string; industry?: string; city?: string; claims: Array<{ claim: string; source_url: string; quote: string }> }>({
+      task: "contact.extract",
+      system: P.ENRICH_SYSTEM,
+      prompt: P.enrichPrompt({ name: company.name, domain: company.domain }, pages),
+      schema: P.ENRICH_SCHEMA,
+      subject: { type: "campaign_company", id: campaignCompanyId },
+    });
+  } catch (e) {
+    db.prepare("UPDATE campaign_company SET status='failed', error_code=?, error_message=?, updated_at=? WHERE id=?")
+      .run((e as { code?: string }).code ?? "ENRICH_FAILED", (e as Error).message.slice(0, 300), now(), campaignCompanyId);
+    throw e;
+  }
 
   // VERIFY. This is the step that makes citations trustworthy: the quote must actually appear
   // in the page text WE fetched and stored, not in something the model remembered.

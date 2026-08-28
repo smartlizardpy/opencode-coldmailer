@@ -77,3 +77,41 @@ test("every contact word scores above the fallback band, so none is ranked off t
       `${path} (band ${minBand}) should outrank the generic /kunye fallback`);
   }
 });
+
+/* Fetcher robustness — a transient network blip must not permanently fail a company. */
+import { test as t2 } from "node:test";
+import { Fetcher } from "../../src/server/research/fetcher.ts";
+import { createServer } from "node:http";
+
+t2("a transient failure is retried, and the second attempt is used", async () => {
+  let hits = 0;
+  const server = createServer((req, res) => {
+    hits++;
+    if (hits === 1) { req.socket.destroy(); return; }   // simulate a dropped connection
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body><p>recovered</p></body></html>");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const f = new Fetcher({ respectRobots: false });
+    const res = await f.fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(res.ok, true, "must recover on retry");
+    assert.match(res.html, /recovered/);
+    assert.ok(hits >= 2, "should have retried");
+  } finally { server.close(); }
+});
+
+t2("a genuine 404 is NOT retried into a false success", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => { hits++; res.writeHead(404); res.end("nope"); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const f = new Fetcher({ respectRobots: false });
+    const res = await f.fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 404);
+    assert.equal(hits, 1, "a 404 is a real answer, not a transient failure");
+  } finally { server.close(); }
+});

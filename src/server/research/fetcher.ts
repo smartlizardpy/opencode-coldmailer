@@ -14,6 +14,29 @@ export const USER_AGENT =
 const MAX_BYTES = 2 * 1024 * 1024;
 const TIMEOUT_MS = 25_000;
 const PER_DOMAIN_GAP_MS = 2_000;
+const RETRIES = 2;
+const RETRY_BACKOFF_MS = [1_500, 4_000];
+
+/**
+ * Failures worth trying again. A transient socket error or timeout is not evidence that a
+ * company has no website - but without a retry it permanently marks them failed and drops
+ * them from the campaign. Observed live: five Turkish news sites all failed with "fetch
+ * failed" during a busy crawl and every one returned 200 on the next attempt.
+ */
+function isTransient(error: string): boolean {
+  return /fetch failed|econnreset|etimedout|econnrefused|epipe|socket|network|aborted|timeout|enotfound|eai_again|handshake/i
+    .test(error);
+}
+
+/** Sites are inconsistent about www. If one host fails outright, the other usually works. */
+function alternateHost(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    if (u.hostname.startsWith("www.")) u.hostname = u.hostname.slice(4);
+    else u.hostname = `www.${u.hostname}`;
+    return u.toString();
+  } catch { return undefined; }
+}
 
 export interface FetchResult {
   url: string;
@@ -146,6 +169,26 @@ export class Fetcher {
     if (this.respectRobots && !(await this.robots.allowed(url))) {
       return { ...base, error: "disallowed by robots.txt" };
     }
+
+    let last: FetchResult = base;
+    for (let attempt = 0; attempt <= RETRIES; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS[attempt - 1] ?? 4_000));
+      last = await this.attempt(url, domain);
+      if (last.ok || !last.error || !isTransient(last.error)) break;
+    }
+    if (last.ok) return last;
+
+    // Still failing after retries: the host itself may be the problem, not the network.
+    const alt = alternateHost(url);
+    if (alt && last.error && isTransient(last.error)) {
+      const altResult = await this.attempt(alt, domainOf(alt));
+      if (altResult.ok) return { ...altResult, url };
+    }
+    return last;
+  }
+
+  private async attempt(url: string, domain: string): Promise<FetchResult> {
+    const base: FetchResult = { url, finalUrl: url, status: 0, contentType: "", html: "", bytes: 0, ok: false };
 
     const gap = Math.max(PER_DOMAIN_GAP_MS, this.robots.crawlDelayMs(url));
     const since = Date.now() - (this.lastHit.get(domain) ?? 0);
