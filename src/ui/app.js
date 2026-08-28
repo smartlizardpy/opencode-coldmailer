@@ -1298,9 +1298,22 @@ async function showCompany(ccId) {
     ${d.contacts.length ? `<div class="tablewrap" style="margin-top:var(--s2)"><table><tbody>
       ${d.contacts.map((c) => `<tr><td class="mono">${esc(c.email)}</td>
         <td>${esc(c.full_name ?? "")} ${esc(c.title ?? "")}</td>
-        <td><span class="tag ${c.source_kind === "published" ? "ok" : c.source_kind === "inferred" ? "warn" : ""}">${esc(c.source_kind)}</span></td>
-        <td><a href="${esc(c.source_url)}" target="_blank" rel="noreferrer noopener">page</a></td></tr>`).join("")}
-    </tbody></table></div>` : `<p class="card-note">No publishable address was found on their site.</p>`}
+        <td><span class="tag ${c.source_kind === "published" ? "ok" : c.source_kind === "inferred" || c.source_kind === "manual" ? "warn" : ""}">${esc(c.source_kind)}</span></td>
+        <td><a href="${esc(c.source_url)}" target="_blank" rel="noreferrer noopener">page</a></td>
+        <td><button class="btn sm ghost" data-draftfor="${esc(c.id)}">Write email</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="card-note">${esc(d.error_code === "CONTACT_FORM_ONLY"
+        ? "They publish no address - enquiries go through a form on their site."
+        : "No publishable address was found on their site.")}</p>`}
+
+    <details style="margin-top:var(--s3)"><summary>Add a contact by hand</summary>
+      <div class="grid2" style="margin-top:var(--s2)">
+        <label class="field">Email<input id="mcEmail" type="email" placeholder="name@company.com"></label>
+        <label class="field">Name (optional)<input id="mcName" placeholder="Jane Smith"></label>
+        <label class="field">Title (optional)<input id="mcTitle" placeholder="Editor"></label>
+      </div>
+      <div class="row"><button class="btn ghost sm" id="btnAddContact">${icon("plus")} Add contact</button>
+        <span class="cellsub">Recorded as added by hand, not as something they published.</span></div>
+    </details>
 
     ${(() => { let n = []; try { n = JSON.parse(d.contact_notes || "[]"); } catch { n = []; }
       return n.length ? `<div class="stat-label" style="margin-top:var(--s4)">${icon("list")} What happened when looking for contacts</div>
@@ -1314,6 +1327,18 @@ async function showCompany(ccId) {
       ${d.pages.map((p) => `<div class="cellsub mono"><a href="${esc(p.url)}" target="_blank" rel="noreferrer noopener">${esc(p.url)}</a></div>`).join("")}
     </details>`,
     async () => {}, "Close");
+  $("#btnAddContact")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/companies/${ccId}/contacts`, {
+        email: $("#mcEmail").value, full_name: $("#mcName").value, title: $("#mcTitle").value,
+      });
+      toast("Contact added"); $("#modal").innerHTML = ""; renderCampaigns();
+    } catch (e) { fail(e); }
+  });
+  $$("[data-draftfor]").forEach((b) => b.onclick = async () => {
+    try { await api(`/api/companies/${ccId}/draft/${b.dataset.draftfor}`, {}); toast("Writing the email…"); $("#modal").innerHTML = ""; }
+    catch (e) { fail(e); }
+  });
   $("#btnRetryCo")?.addEventListener("click", async () => {
     try { await api(`/api/companies/${ccId}/retry`, {}); toast("Queued for another try"); $("#modal").innerHTML = ""; renderCampaigns(); }
     catch (e) { fail(e); }

@@ -314,6 +314,47 @@ export function registerRoutes(r: Router, app: AppContext): void {
     return { ok: true };
   });
 
+  /**
+   * Add a contact by hand.
+   *
+   * A large share of sites publish no address at all - they take enquiries through a form -
+   * and for those the crawler is simply never going to find anything. Letting the user paste
+   * an address they found themselves unblocks that whole class, and the tier records honestly
+   * that a person supplied it rather than the site publishing it.
+   */
+  r.post("/api/companies/:ccId/contacts", ({ params, body }: RouteCtx) => {
+    const cc = db.prepare("SELECT campaign_id, company_id FROM campaign_company WHERE id=?").get(params.ccId) as any;
+    if (!cc) throw bad("company not found", "NOT_FOUND", 404);
+    const email = String(body.email ?? "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw bad("that does not look like an email address");
+    const sup = isSuppressed(db, email);
+    if (sup.suppressed) throw bad(`${email} is on the never-contact list (${sup.reason})`, "SUPPRESSED");
+    const dup = db.prepare("SELECT id FROM contact WHERE company_id=? AND lower(email)=?").get(cc.company_id, email);
+    if (dup) throw bad("that address is already on this company");
+
+    const company = db.prepare("SELECT website_url, domain FROM company WHERE id=?").get(cc.company_id) as any;
+    db.prepare(
+      `INSERT INTO contact (id,company_id,full_name,first_name,title,email,email_status,source_url,
+         source_kind,source_snippet,confidence,is_role_account,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,'syntax_ok',?,'manual',?,0.5,?,?,?)`,
+    ).run(ulid(), cc.company_id, body.full_name || null,
+          String(body.full_name ?? "").split(/\s+/)[0] || null, body.title || null, email,
+          company?.website_url ?? `https://${company?.domain ?? ""}`,
+          "added by hand", email.split("@")[0].length <= 8 ? 1 : 0, now(), now());
+    db.prepare("UPDATE campaign_company SET status='contacts_found', error_code=NULL, error_message=NULL, updated_at=? WHERE id=?")
+      .run(now(), params.ccId);
+    app.bus.emit("companies:changed", { campaignId: cc.campaign_id });
+    return { ok: true };
+  });
+
+  /** Write a draft for one contact without running the whole campaign. */
+  r.post("/api/companies/:ccId/draft/:contactId", ({ params }: RouteCtx) =>
+    background(app, `draft:${params.contactId}`, "Writing an email", async () => {
+      const out = await composeDraft({ db, llm: app.llm }, params.ccId, params.contactId, { priority: "interactive" });
+      app.bus.emit("drafts:changed", {});
+      return out;
+    }));
+
   r.get("/api/companies/:ccId", ({ params }: RouteCtx) => {
     const cc = db.prepare(
       `SELECT cc.*, co.name, co.domain, co.website_url, co.summary, co.city
