@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, ulid, now, type Db } from "../../src/server/db/index.ts";
 import { migrate } from "../../src/server/db/migrate.ts";
-import { seedDefaults, setSetting } from "../../src/server/db/settings.ts";
+import { getSetting, seedDefaults, setSetting } from "../../src/server/db/settings.ts";
 import { hasReplied, isTransientSmtpError, isSuppressed, sendGuards, sendOne, suppress, approveDraft } from "../../src/server/queue/sendQueue.ts";
 
 const SMTP = { host: "127.0.0.1", port: 1, secure: false, user: "u", fromEmail: "me@me.com", fromName: "Me" };
@@ -211,4 +211,37 @@ test("a bounce does not count as the person replying", () => {
   assert.equal(hasReplied(db, ids.ct), false, "an out-of-office is not a reply");
   insert("reply");
   assert.equal(hasReplied(db, ids.ct), true, "a person answering is");
+});
+
+test("a send outside the window is refused, and the draft stays approved", async () => {
+  // Refused, not discarded: the whole point is that it goes out tomorrow morning instead.
+  const { db, ids } = world();
+  const d = draft(db, ids);
+  // A window that cannot contain "now", whatever the clock says when the suite runs.
+  const hour = new Date().getHours();
+  setSetting(db, "sending", {
+    ...getSetting<any>(db, "sending", {}), paused: false,
+    window: { enabled: true, startHour: (hour + 2) % 24, endHour: (hour + 3) % 24, days: [0, 1, 2, 3, 4, 5, 6] },
+  });
+
+  const g = sendGuards(db);
+  assert.equal(g.windowOpen, false);
+  assert.ok(g.windowOpensAt && g.windowOpensAt > Date.now(), "and it says when it opens again");
+
+  const out = await sendOne(db, d, SMTP);
+  assert.equal((out as any).code, "OUTSIDE_WINDOW");
+  assert.equal((db.prepare("SELECT status FROM email_draft WHERE id=?").get(d) as any).status, "approved",
+    "still approved - it sends when the window opens");
+});
+
+test("the window does not block anything while it is switched off", () => {
+  const { db } = world();
+  setSetting(db, "sending", {
+    ...getSetting<any>(db, "sending", {}),
+    window: { enabled: false, startHour: 3, endHour: 4, days: [] },
+  });
+  const g = sendGuards(db);
+  assert.equal(g.windowOpen, true);
+  assert.equal(g.windowOpensAt, undefined);
+  assert.equal(g.windowLabel, "any time");
 });

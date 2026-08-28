@@ -1,5 +1,6 @@
 /** Typed accessors over the `setting` key/value table. */
 import { now, type Db } from "./index.ts";
+import { DEFAULT_WINDOW, type SendWindow } from "../queue/window.ts";
 
 export interface SendingSettings {
   dailyLimit: number;
@@ -14,6 +15,8 @@ export interface SendingSettings {
   footerEnabled: boolean;
   footerText: string;
   paused: boolean;
+  /** When it is acceptable to send. See queue/window.ts. */
+  window?: SendWindow;
 }
 
 export const DEFAULT_SETTINGS: Record<string, unknown> = {
@@ -25,6 +28,9 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
     footerText: "",
     // Starts paused. Nothing leaves this machine until the user explicitly presses Start.
     paused: true,
+    // Off by default: a first-time user testing the app should not find their send silently
+    // refused because it is Sunday. It is one switch away in Settings.
+    window: DEFAULT_WINDOW,
   } satisfies SendingSettings,
   llm: { researchTimeoutMs: 300_000, writingTimeoutMs: 90_000, maxAttemptsPerModel: 2, maxModelFailover: 2 },
   opencode: { binPath: null, enableExa: false },

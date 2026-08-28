@@ -27,6 +27,16 @@ function when(ts) {
   if (d === 1) return "tomorrow";
   return `in ${d} days`;
 }
+/** How long until `ts`, in the largest unit that still reads naturally. */
+function until(ts) {
+  const s = Math.round((ts - Date.now()) / 1000);
+  if (s <= 60) return "under a minute";
+  if (s < 3600) return `${Math.round(s / 60)} minutes`;
+  if (s < 86400) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h} hour${h === 1 ? "" : "s"}`; }
+  const d = Math.round(s / 86400);
+  return `${d} day${d === 1 ? "" : "s"}`;
+}
 const dt = (ts) => ts ? new Intl.DateTimeFormat(undefined,
   { dateStyle: "medium", timeStyle: "short" }).format(ts) : "—";
 
@@ -58,6 +68,14 @@ function toast(msg, bad = false) {
   toastTimer = setTimeout(() => t.classList.add("hidden"), bad ? 7000 : 3200);
 }
 const fail = (e) => { console.error(e); toast(e?.message || String(e), true); };
+
+const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const TZ_NAME = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "this machine's clock"; }
+  catch { return "this machine's clock"; }
+})();
+const hourOptions = (selected) => Array.from({ length: 24 }, (_, h) =>
+  `<option value="${h}" ${h === selected ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("");
 
 /* ───────────────────────────────────────────────────────── navigation */
 
@@ -835,9 +853,15 @@ async function renderOutbox() {
           <div class="progress" style="margin-top:var(--s2);max-width:none">
             <i style="clip-path:inset(0 ${100 - capPct}% 0 0)"></i></div></div>
         <div class="stat"><div class="stat-label">Status</div>
-          <div class="stat-value" style="font-size:17px">${status.paused ? "Paused" : status.running ? "Running" : "Idle"}</div>
+          <div class="stat-value" style="font-size:17px">${
+            status.paused ? "Paused" : !status.windowOpen ? "Waiting" : status.running ? "Running" : "Idle"}</div>
           <div class="stat-foot">${esc(status.lastOutcome ?? "—")}</div></div>
       </div>
+      ${!status.windowOpen ? `<div class="flagbox" style="margin:var(--s4) 0 0">
+        ${icon("clock")} <b>Outside your sending window (${esc(status.windowLabel)})</b>
+        <div>${status.approved ? `${num(status.approved)} approved email${status.approved === 1 ? "" : "s"} will go out` : "Sending resumes"}
+        ${status.windowOpensAt ? `when the window opens, ${esc(until(status.windowOpensAt))} from now — around ${esc(dt(status.windowOpensAt))}.` : "when the window opens."}
+        Nothing is queued or lost.</div></div>` : ""}
       <p class="card-note">One email at a time, with a randomised gap. The cap counts what actually
         left in the last 24 hours, so restarting the app can't get around it. Suppression and
         replies are re-checked at the moment of sending, not when you approved.</p>
@@ -1130,6 +1154,7 @@ async function renderSettings() {
     api("/api/integrity").catch(() => ({ ok: true, violations: [] })),
   ]);
   const m = s.smtp ?? {}, g = s.sending ?? {};
+  const win = g.window ?? { enabled: false, startHour: 9, endHour: 17, days: [1, 2, 3, 4, 5] };
   const r = health.model.research, w = health.model.writing;
 
   $("#content").innerHTML = page(`
@@ -1202,6 +1227,28 @@ async function renderSettings() {
     </div>
 
     <div class="card">
+      <div class="card-head"><h2>When to send</h2>
+        <span class="cellsub">Your local time — ${esc(TZ_NAME)}.</span></div>
+      <label class="check">
+        <input type="checkbox" id="winEnabled" ${win.enabled ? "checked" : ""}>
+        Only send during these hours</label>
+      <div class="grid3" style="margin-top:var(--s3)">
+        <label class="field">From<select id="winStart">${hourOptions(win.startHour ?? 9)}</select></label>
+        <label class="field">Until<select id="winEnd">${hourOptions(win.endHour ?? 17)}</select></label>
+        <div class="field"><span>Days</span>
+          <div class="daypick" role="group" aria-label="Days to send on">
+            ${DAY_SHORT.map((d, i) => `<button type="button" class="daybtn" data-day="${i}"
+              aria-pressed="${(win.days ?? [1,2,3,4,5]).includes(i)}">${esc(d)}</button>`).join("")}
+          </div>
+        </div>
+      </div>
+      <p class="card-note">A cold email that lands at 3am reads as a machine before it reads as
+        anything else. Outside these hours nothing is queued or lost — approved drafts simply
+        wait, and sending picks up on its own when the window opens.</p>
+      <div class="row" style="margin-top:var(--s3)"><button class="btn ghost" id="btnSaveWindow">Save window</button></div>
+    </div>
+
+    <div class="card">
       <div class="card-head"><h2>Never contact</h2><span class="tag">${num(sup.length)}</span></div>
       <div class="row">
         <input id="supPattern" aria-label="Address or domain to never contact" placeholder="someone@example.com or @example.com" style="flex:1;min-width:200px">
@@ -1256,6 +1303,20 @@ async function renderSettings() {
         footerText: $("#footerText").value,
       } });
       toast("Saved");
+    } catch (e) { fail(e); }
+  };
+  $$(".daybtn").forEach((b) => b.onclick = () =>
+    b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") === "true" ? "false" : "true"));
+  $("#btnSaveWindow").onclick = async () => {
+    const days = $$(".daybtn").filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => +b.dataset.day);
+    if ($("#winEnabled").checked && !days.length) return toast("Pick at least one day", true);
+    try {
+      await api("/api/settings", { sending: { window: {
+        enabled: $("#winEnabled").checked, startHour: +$("#winStart").value,
+        endHour: +$("#winEnd").value, days,
+      } } });
+      toast("Saved");
+      loadHealth();
     } catch (e) { fail(e); }
   };
   $("#btnSuppress").onclick = async () => {

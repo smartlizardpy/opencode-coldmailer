@@ -429,3 +429,16 @@ details[open] summary::before{transform:rotate(90deg)}
 
 @media (max-width: 720px) { .dpanel { flex-direction: column; align-items: flex-start; } }
 @media (prefers-reduced-motion: reduce) { .ring-fill { transition: none; } }
+
+/* ── day picker ─────────────────────────────────────────────────────── */
+
+.daypick { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 5px; }
+.daybtn {
+  font: inherit; font-size: 12px; padding: 6px 9px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--raised); color: var(--muted);
+  border-radius: var(--r-sm); transition: all var(--fast) var(--ease);
+}
+.daybtn:hover { border-color: var(--muted); }
+/* aria-pressed carries the state, so the styling and the accessibility tree cannot disagree. */
+.daybtn[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.daybtn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }

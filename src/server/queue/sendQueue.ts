@@ -9,9 +9,18 @@ import { ulid, now, tx, type Db } from "../db/index.ts";
 import { getSecret } from "../mail/secrets.ts";
 import { newMessageId, sendMail, type SmtpConfig } from "../mail/smtp.ts";
 import { getSetting, type SendingSettings } from "../db/settings.ts";
+import { describeWindow, isOpen, nextOpen, normaliseWindow } from "./window.ts";
 import { productForDraft, renderedBody } from "../research/compose.ts";
 
-export interface SendGuards { dailyLimit: number; sentLast24h: number; paused: boolean; remaining: number }
+export interface SendGuards {
+  dailyLimit: number; sentLast24h: number; paused: boolean; remaining: number;
+  /** False when the configured sending window is closed right now. */
+  windowOpen: boolean;
+  /** Epoch ms the window next opens, absent when it is open or not configured. */
+  windowOpensAt?: number;
+  /** Human summary of the window, for the UI to show without re-deriving it. */
+  windowLabel: string;
+}
 
 export function sendGuards(db: Db, campaignId?: string): SendGuards {
   const s = getSetting<SendingSettings>(db, "sending", { dailyLimit: 30, paused: false } as SendingSettings);
@@ -22,7 +31,12 @@ export function sendGuards(db: Db, campaignId?: string): SendGuards {
     const c = db.prepare("SELECT daily_send_limit FROM campaign WHERE id=?").get(campaignId) as { daily_send_limit: number } | undefined;
     if (c) limit = Math.min(limit, c.daily_send_limit);
   }
-  return { dailyLimit: limit, sentLast24h: row.c, paused: !!s.paused, remaining: Math.max(0, limit - row.c) };
+  const w = normaliseWindow(s.window);
+  const opensAt = nextOpen(w);
+  return {
+    dailyLimit: limit, sentLast24h: row.c, paused: !!s.paused, remaining: Math.max(0, limit - row.c),
+    windowOpen: isOpen(w), windowOpensAt: opensAt?.getTime(), windowLabel: describeWindow(w),
+  };
 }
 
 /** Suppression matches the exact address or the whole domain. */
@@ -144,6 +158,11 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
 
   const g = sendGuards(db, d.campaign_id);
   if (g.paused) return { sent: false, reason: "sending is paused", code: "PAUSED" };
+  // Refused, not queued. The drain loop comes back on its own when the window opens, and a
+  // draft that sits approved overnight is exactly what should happen.
+  if (!g.windowOpen) {
+    return { sent: false, reason: `outside the sending window (${g.windowLabel})`, code: "OUTSIDE_WINDOW" };
+  }
   if (g.remaining <= 0) return { sent: false, reason: `daily cap reached (${g.sentLast24h}/${g.dailyLimit})`, code: "DAILY_CAP" };
 
   const password = await getSecret(db, "smtp.password");
@@ -274,6 +293,13 @@ export class SendRunner {
       const g = sendGuards(this.db);
       if (g.paused) { this.lastOutcome = "paused"; return this.schedule(30_000); }
       if (g.remaining <= 0) { this.lastOutcome = `daily cap reached (${g.sentLast24h}/${g.dailyLimit})`; return this.schedule(15 * 60_000); }
+      if (!g.windowOpen) {
+        this.lastOutcome = `outside the sending window (${g.windowLabel})`;
+        // Wake a minute after it opens rather than polling: the window is minutes-accurate
+        // and the gap to Monday morning can be two days.
+        const wait = g.windowOpensAt ? Math.max(30_000, g.windowOpensAt - Date.now() + 60_000) : 15 * 60_000;
+        return this.schedule(Math.min(wait, 60 * 60_000));
+      }
       const id = nextApprovedDraftId(this.db);
       if (!id) { this.lastOutcome = "nothing approved"; return this.schedule(20_000); }
       const cfg = this.smtp();
