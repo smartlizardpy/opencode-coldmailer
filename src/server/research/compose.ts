@@ -17,15 +17,44 @@ export interface ComposeResult {
   usedClaims: number; flags: string[];
 }
 
-/** Footer is OFF by default, by explicit instruction. Only appended when switched on. */
-export function renderBody(db: Db, body: string, product: any): string {
+/**
+ * The message plus the signature, and the opt-out footer if it is switched on.
+ *
+ * Called when a draft is displayed and again when it is sent, rather than baked in at compose
+ * time, so editing your name or enabling the footer applies to everything not yet sent. The
+ * footer is OFF by default, by explicit instruction.
+ */
+export function renderBody(db: Db, body: string, product: { sender_name?: string; sender_title?: string; sender_company?: string } | undefined): string {
   const s = getSetting<SendingSettings>(db, "sending", {} as SendingSettings);
-  const sig = [product.sender_name, product.sender_title, product.sender_company]
+  const sig = [product?.sender_name, product?.sender_title, product?.sender_company]
     .filter(Boolean).join("\n");
-  let out = body.trim();
+  let out = (body ?? "").trim();
   if (sig) out += `\n\n${sig}`;
   if (s.footerEnabled && s.footerText?.trim()) out += `\n\n${s.footerText.trim()}`;
   return out;
+}
+
+/**
+ * The email as it will actually be sent.
+ *
+ * A version written before this change already contains the signature, so re-rendering it
+ * would duplicate it. signature_mode records which kind a row is.
+ */
+export function renderedBody(
+  db: Db,
+  version: { body_text: string; signature_mode?: string },
+  product?: { sender_name?: string; sender_title?: string; sender_company?: string },
+): string {
+  if (version.signature_mode !== "rendered") return version.body_text;
+  return renderBody(db, version.body_text, product);
+}
+
+export function productForDraft(db: Db, draftId: string): { sender_name?: string; sender_title?: string; sender_company?: string } | undefined {
+  return db.prepare(
+    `SELECT p.sender_name, p.sender_title, p.sender_company
+     FROM email_draft d JOIN campaign c ON c.id = d.campaign_id
+     JOIN product p ON p.id = c.product_id WHERE d.id = ?`,
+  ).get(draftId) as never;
 }
 
 export async function composeDraft(
@@ -91,14 +120,15 @@ export async function composeDraft(
       }));
       const version = maxV.v + i + 1;
       const versionId = ulid();
-      const rendered = renderBody(db, v.body, product);
-      const flags = checkQuality({ subject: v.subject, body: v.body, citedClaims: used.length });
+      const message = v.body.trim();
+      const flags = checkQuality({ subject: v.subject, body: message, citedClaims: used.length });
       db.prepare(
         `INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,llm_call_id,
-           edit_note,personalization,word_count,quality_flags,created_at) VALUES (?,?,?,?,?,'llm',?,?,?,?,?,?)`,
-      ).run(versionId, draft.id, version, v.subject.trim(), rendered,
+           edit_note,personalization,word_count,quality_flags,signature_mode,created_at)
+         VALUES (?,?,?,?,?,'llm',?,?,?,?,?,'rendered',?)`,
+      ).run(versionId, draft.id, version, v.subject.trim(), message,
             r.meta.llmCallId, opts.instruction ?? null, JSON.stringify(personalization),
-            countWords(v.body), JSON.stringify(flags), now());
+            countWords(message), JSON.stringify(flags), now());
       if (!firstResult) firstResult = {
         draftId: draft.id, version, subject: v.subject.trim(), body: v.body,
         usedClaims: used.length, flags: flags.map((f) => f.flag),
@@ -119,9 +149,12 @@ export function saveHumanEdit(db: Db, draftId: string, subject: string, body: st
     // A human edit is checked too, but the citation flag is not applied: the person writing it
     // owns what they wrote, and we did not give them claim ids to cite.
     const flags = checkQuality({ subject, body, citedClaims: 1 });
+    // A human edit is stored exactly as typed: if someone deletes the signature we must not
+    // put it back, so their text is treated as the complete email.
     db.prepare(
       `INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,edit_note,
-         personalization,word_count,quality_flags,created_at) VALUES (?,?,?,?,?,'human',?,'[]',?,?,?)`,
+         personalization,word_count,quality_flags,signature_mode,created_at)
+       VALUES (?,?,?,?,?,'human',?,'[]',?,?,'baked',?)`,
     ).run(ulid(), draftId, version, subject, body, note ?? null,
           countWords(body), JSON.stringify(flags), now());
     db.prepare("UPDATE email_draft SET updated_at=? WHERE id=?").run(now(), draftId);

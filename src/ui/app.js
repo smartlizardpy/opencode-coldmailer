@@ -758,7 +758,8 @@ function editDialog(full) {
     <label class="field">Subject<input id="edSubject" value="${esc(full.subject)}"></label>
     <label class="field" style="margin-top:var(--s3)">Body
       <textarea id="edBody" rows="14">${esc(full.body_text)}</textarea></label>
-    <p class="card-note">Saved as a new version. The original is kept.</p>`,
+    <p class="card-note">Saved as a new version; the original is kept. What you type here is sent
+      exactly as written, signature included — editing takes it out of the app's hands.</p>`,
     async () => {
       await api(`/api/drafts/${full.draft_id}/edit`, { subject: $("#edSubject").value, body: $("#edBody").value });
       toast("Saved"); renderReview();

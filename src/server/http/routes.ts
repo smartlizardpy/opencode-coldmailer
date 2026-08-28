@@ -11,7 +11,7 @@ import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/ima
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
 import { parseCompanyList } from "../research/importList.ts";
-import { composeDraft, saveHumanEdit } from "../research/compose.ts";
+import { composeDraft, saveHumanEdit, renderedBody, productForDraft } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
 import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
 import { integrityReport, repairOrphans } from "../db/migrate.ts";
@@ -521,7 +521,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
       `SELECT co.name FROM campaign_company cc JOIN company co ON co.id=cc.company_id WHERE cc.id=?`,
     ).get(d.campaign_company_id) as { name: string } | undefined;
     return {
-      ...d, claims, company: company?.name ?? "",
+      // What the reviewer sees must be exactly what leaves - the signature is rendered at
+      // send time, so it has to be rendered here too, from the same function.
+      ...d, body_text: renderedBody(db, d, productForDraft(db, params.id)),
+      message_body: d.body_text,
+      claims, company: company?.name ?? "",
       // Shown as a warning in review, so it is seen before approving rather than as a
       // silent refusal at send time.
       alreadyContacted: contactedElsewhere(db, d.contact_id, d.campaign_id),

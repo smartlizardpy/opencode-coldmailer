@@ -9,6 +9,7 @@ import { ulid, now, tx, type Db } from "../db/index.ts";
 import { getSecret } from "../mail/secrets.ts";
 import { newMessageId, sendMail, type SmtpConfig } from "../mail/smtp.ts";
 import { getSetting, type SendingSettings } from "../db/settings.ts";
+import { productForDraft, renderedBody } from "../research/compose.ts";
 
 export interface SendGuards { dailyLimit: number; sentLast24h: number; paused: boolean; remaining: number }
 
@@ -148,7 +149,10 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
   }
 
   try {
-    const r = await sendMail(smtp, password, { to: contact.email, subject: d.subject, text: d.body_text, messageId });
+    // Rendered here, not at compose time, so the signature and the opt-out footer reflect the
+    // settings as they are now rather than as they were when the draft was written.
+    const text = renderedBody(db, d, productForDraft(db, draftId));
+    const r = await sendMail(smtp, password, { to: contact.email, subject: d.subject, text, messageId });
     tx(db, () => {
       db.prepare("UPDATE send_log SET status='sent', sent_at=?, smtp_response=? WHERE id=?").run(now(), r.response.slice(0, 500), sendLogId);
       db.prepare("UPDATE email_draft SET status='sent', updated_at=? WHERE id=?").run(now(), draftId);
