@@ -88,7 +88,11 @@ export function isPlausibleCompanyDomain(url: string): boolean {
 export interface DiscoverResult { found: number; added: number; queries: string[]; skipped: string[] }
 
 export async function discoverCompanies(
-  deps: PipelineDeps, campaignId: string, opts: { extra?: string } = {},
+  deps: PipelineDeps, campaignId: string,
+  // Discovery is five sequential research calls and each one is an agentic loop over a web
+  // search, so it routinely runs for minutes. Without this the UI shows "Finding companies"
+  // and nothing else for the whole of it, which is indistinguishable from being hung.
+  opts: { extra?: string; onProgress?: (p: { index: number; total: number; stage: string; query?: string }) => void } = {},
 ): Promise<DiscoverResult> {
   const { db, llm } = deps;
   const { campaign, product } = getCampaign(db, campaignId);
@@ -98,6 +102,8 @@ export async function discoverCompanies(
   db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), campaignId);
 
   const target = targetOf(campaign, product);
+  const progress = opts.onProgress ?? (() => {});
+  progress({ index: 0, total: 1, stage: "working out what to search for" });
   const q = await llm.run<{ queries: Array<{ query: string; targets_signal: string }> }>({
     task: "search.queries",
     system: P.SEARCH_QUERIES_SYSTEM,
@@ -113,10 +119,15 @@ export async function discoverCompanies(
   if (campaign.discovery_mode === "opencode_search") {
     // One research call per query keeps each session small and stops one bad query from
     // poisoning the rest.
-    for (const query of queries.slice(0, 5)) {
+    const planned = queries.slice(0, 5);
+    let done = 0;
+    for (const query of planned) {
+      progress({ index: done, total: planned.length, stage: "searching", query });
       try {
         const r = await llm.run<{ companies: Found[] }>({
-          task: "company.enrich",
+          // Named for what it is. Logging discovery as "company.enrich" made the Activity
+          // screen report a stage that had not run, which is worse than no label at all.
+          task: "discover.search",
           system: P.DISCOVER_SYSTEM,
           prompt: `Search the web for: ${query}
 
@@ -143,6 +154,8 @@ Report only organisations that are genuinely the KIND of thing the target descri
       } catch (e) {
         skipped.push(`query "${query}" failed: ${(e as Error).message.slice(0, 120)}`);
       }
+      done++;
+      progress({ index: done, total: planned.length, stage: `${found.length} found so far`, query });
     }
   }
 

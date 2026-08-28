@@ -342,7 +342,14 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   r.post("/api/campaigns/:id/discover", ({ params, body }: RouteCtx) =>
     background(app, `discover:${params.id}`, "Finding companies", async () => {
-      const out = await discoverCompanies({ db, llm: app.llm, fetcher: app.fetcher }, params.id, { extra: body.extra });
+      const out = await discoverCompanies({ db, llm: app.llm, fetcher: app.fetcher }, params.id, {
+        extra: body.extra,
+        // Reuses the run bar the pipeline already drives, so the progress the user sees during
+        // discovery looks and behaves exactly like the progress they see during a run.
+        onProgress: (p) => app.bus.emit("run:progress", {
+          index: p.index, total: p.total, stage: p.stage, company: p.query ? `"${p.query}"` : undefined,
+        }),
+      });
       app.bus.emit("companies:changed", { campaignId: params.id });
       return out;
     }));

@@ -23,6 +23,18 @@ import { AGENT_EXTRACT, AGENT_RESEARCH, toolsMapFor } from "./policy.ts";
  */
 const NON_TEXT = /(embedding|image|tts|veo|lyria|live|computer-use|robotics|deep-research|guard|rerank|whisper|transcribe|moderation)/i;
 
+/**
+ * How much slower than the fastest passing model a preferred one may be before it is skipped.
+ *
+ * The preference list below is a judgement about quality made before anything was measured.
+ * The probe measures latency and then, until this existed, threw the number away - so the
+ * research slot went to a model that answered a trivial prompt in 17 seconds while another
+ * that passed every probe did it in one. That is not a quality trade-off you notice; it is a
+ * campaign that takes ninety minutes instead of six. One probe is a noisy sample, so the
+ * threshold is deliberately far outside anything noise produces.
+ */
+const MAX_LATENCY_RATIO = 5;
+
 /** Preference order among the free models, best-first. Unknown ones sort after, alphabetically. */
 const FREE_PREFERENCE = [
   "nemotron-3-ultra-free",
@@ -173,21 +185,43 @@ export async function probeModels(client: OpencodeClient, opts: ProbeOptions = {
 
   const research = researchRanking.filter((m) => m.ok && m.searchProbe === "pass");
   const writing = writingRanking.filter((m) => m.ok);
+  const researchPick = pickByPreferenceAndSpeed(research);
+  const writingPick = pickByPreferenceAndSpeed(writing);
 
   return {
     research: {
-      active: research[0] ? { providerID: research[0].providerID, modelID: research[0].modelID } : null,
+      active: researchPick ? { providerID: researchPick.providerID, modelID: researchPick.modelID } : null,
       ranking: researchRanking,
       status: research.length > 0 ? "ok" : "none",
     },
     writing: {
-      active: writing[0] ? { providerID: writing[0].providerID, modelID: writing[0].modelID } : null,
+      active: writingPick ? { providerID: writingPick.providerID, modelID: writingPick.modelID } : null,
       ranking: writingRanking,
       status: writing.length > 0 ? "ok" : "none",
     },
     enableExa,
     probedAt: Date.now(),
   };
+}
+
+/**
+ * The first model in preference order, unless it is drastically slower than one that also
+ * passed - in which case take the fastest of the ones that are not.
+ *
+ * `candidates` must already be filtered to models that passed and sorted by preference.
+ */
+export function pickByPreferenceAndSpeed(candidates: ProbedModel[]): ProbedModel | undefined {
+  if (candidates.length === 0) return undefined;
+  const timed = candidates.filter((m) => typeof m.latencyMs === "number" && m.latencyMs > 0);
+  if (timed.length < 2) return candidates[0];
+
+  const fastest = Math.min(...timed.map((m) => m.latencyMs!));
+  // Walk in preference order and take the first that is not pathologically slow. Preference
+  // still wins between models of comparable speed, which is the whole point of the list.
+  const acceptable = candidates.find(
+    (m) => typeof m.latencyMs !== "number" || m.latencyMs <= fastest * MAX_LATENCY_RATIO,
+  );
+  return acceptable ?? candidates[0];
 }
 
 /** In-memory cooldowns. A model enters one on 429 or repeated schema failures. */
