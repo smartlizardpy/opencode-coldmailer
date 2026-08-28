@@ -123,3 +123,47 @@ test("approveDraft only promotes a draft that is actually reviewable", () => {
   assert.equal((db.prepare("SELECT status FROM email_draft WHERE id=?").get(sent) as any).status, "sent",
     "an already-sent draft must not be re-approved back into the queue");
 });
+
+/* Backoff. A temporary failure must wait, and must not retry forever. */
+import { nextApprovedDraftId, retryBackoffMs, temporaryFailures } from "../../src/server/queue/sendQueue.ts";
+
+test("a draft scheduled in the future is not picked up yet", () => {
+  const { db, ids } = world();
+  const d = draft(db, ids);
+  assert.equal(nextApprovedDraftId(db), d, "with no schedule it is next");
+  db.prepare("UPDATE email_draft SET scheduled_for=? WHERE id=?").run(Date.now() + 60_000, d);
+  assert.equal(nextApprovedDraftId(db), undefined,
+    "without this a greylisted address is retried about once a second, forever");
+  db.prepare("UPDATE email_draft SET scheduled_for=? WHERE id=?").run(Date.now() - 1_000, d);
+  assert.equal(nextApprovedDraftId(db), d, "once the backoff has passed it comes back");
+});
+
+test("the backoff grows and then levels off", () => {
+  const mins = [1, 2, 3, 4, 5].map((a) => retryBackoffMs(a) / 60_000);
+  assert.deepEqual(mins, [2, 10, 30, 120, 120]);
+  for (let i = 1; i < mins.length; i++) assert.ok(mins[i] >= mins[i - 1], "must never shrink");
+});
+
+test("temporary failures are counted from the send log, so a restart does not reset them", () => {
+  const { db, ids } = world();
+  const d = draft(db, ids);
+  const v = (db.prepare("SELECT id FROM email_draft_version WHERE draft_id=?").get(d) as any).id;
+  assert.equal(temporaryFailures(db, d), 0);
+  for (let i = 0; i < 3; i++) {
+    db.prepare("INSERT INTO send_log (id,draft_id,version_id,campaign_id,contact_id,to_email,from_email,subject,message_id,status,error_code,created_at) VALUES (?,?,?,?,?,?,?,?,?,'failed','SMTP_TEMPORARY',?)")
+      .run(ulid(), d, v, ids.c, ids.ct, "a@x.com", "m@m.com", "s", `<t${i}@cc>`, now());
+  }
+  assert.equal(temporaryFailures(db, d), 3);
+});
+
+test("approving again clears a pending backoff - it means 'try this now'", () => {
+  const { db, ids } = world();
+  const d = draft(db, ids, "needs_review");
+  db.prepare("UPDATE email_draft SET scheduled_for=?, error_code='SMTP_TEMPORARY' WHERE id=?").run(Date.now() + 3600_000, d);
+  approveDraft(db, d);
+  const row = db.prepare("SELECT status, scheduled_for, error_code FROM email_draft WHERE id=?").get(d) as any;
+  assert.equal(row.status, "approved");
+  assert.equal(row.scheduled_for, null);
+  assert.equal(row.error_code, null);
+  assert.equal(nextApprovedDraftId(db), d);
+});

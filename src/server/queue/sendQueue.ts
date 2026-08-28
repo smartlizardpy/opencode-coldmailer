@@ -59,7 +59,9 @@ export function contactedElsewhere(db: Db, contactId: string, campaignId: string
 }
 
 export function approveDraft(db: Db, draftId: string): void {
-  db.prepare("UPDATE email_draft SET status='approved', approved_at=?, updated_at=? WHERE id=? AND status IN ('draft','needs_review')")
+  // scheduled_for is cleared: approving again is an explicit "try this now".
+  db.prepare(`UPDATE email_draft SET status='approved', approved_at=?, scheduled_for=NULL,
+     error_code=NULL, error_message=NULL, updated_at=? WHERE id=? AND status IN ('draft','needs_review')`)
     .run(now(), now(), draftId);
 }
 
@@ -168,10 +170,16 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
       db.prepare("UPDATE send_log SET status='failed', error_code=?, error_message=? WHERE id=?")
         .run(transient ? "SMTP_TEMPORARY" : "SMTP_ERROR", msg, sendLogId);
       if (transient) {
-        // Leave it approved so the runner picks it up again rather than losing a good email
-        // to a greylist or a dropped connection.
-        db.prepare("UPDATE email_draft SET error_code='SMTP_TEMPORARY', error_message=?, updated_at=? WHERE id=?")
-          .run(msg, now(), draftId);
+        // Leave it approved so the runner picks it up again rather than losing a good email to
+        // a greylist or a dropped connection - but not immediately, and not forever.
+        const attempts = temporaryFailures(db, draftId);
+        if (attempts >= 5) {
+          db.prepare("UPDATE email_draft SET status='failed', error_code='SMTP_GAVE_UP', error_message=?, updated_at=? WHERE id=?")
+            .run(`giving up after ${attempts} temporary failures: ${msg}`, now(), draftId);
+        } else {
+          db.prepare("UPDATE email_draft SET error_code='SMTP_TEMPORARY', error_message=?, scheduled_for=?, updated_at=? WHERE id=?")
+            .run(msg, Date.now() + retryBackoffMs(attempts), now(), draftId);
+        }
       } else {
         db.prepare("UPDATE email_draft SET status='failed', error_code='SMTP_ERROR', error_message=?, updated_at=? WHERE id=?")
           .run(msg, now(), draftId);
@@ -181,12 +189,34 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
   }
 }
 
+/**
+ * The next draft to send.
+ *
+ * `scheduled_for` is respected so a draft that failed temporarily waits its backoff. Without
+ * that, a temporary SMTP failure leaves the draft approved and it is picked again on the very
+ * next tick - a greylisted address would be retried roughly once a second, forever, which is
+ * both useless and the fastest way to be treated as an attacker.
+ */
 export function nextApprovedDraftId(db: Db, campaignId?: string): string | undefined {
-  const sql = campaignId
-    ? "SELECT id FROM email_draft WHERE status='approved' AND campaign_id=? ORDER BY approved_at LIMIT 1"
-    : "SELECT id FROM email_draft WHERE status='approved' ORDER BY approved_at LIMIT 1";
-  const row = (campaignId ? db.prepare(sql).get(campaignId) : db.prepare(sql).get()) as { id: string } | undefined;
+  const where = "status='approved' AND (scheduled_for IS NULL OR scheduled_for <= ?)";
+  const row = (campaignId
+    ? db.prepare(`SELECT id FROM email_draft WHERE ${where} AND campaign_id=? ORDER BY approved_at LIMIT 1`).get(Date.now(), campaignId)
+    : db.prepare(`SELECT id FROM email_draft WHERE ${where} ORDER BY approved_at LIMIT 1`).get(Date.now())
+  ) as { id: string } | undefined;
   return row?.id;
+}
+
+/** How long to wait before trying a temporarily-failed send again. */
+export function retryBackoffMs(attempt: number): number {
+  const minutes = [2, 10, 30, 120][Math.min(attempt - 1, 3)] ?? 120;
+  return minutes * 60_000;
+}
+
+/** Temporary failures so far for this draft, from the send log rather than memory. */
+export function temporaryFailures(db: Db, draftId: string): number {
+  return Number((db.prepare(
+    "SELECT COUNT(*) c FROM send_log WHERE draft_id=? AND error_code='SMTP_TEMPORARY'",
+  ).get(draftId) as { c: number }).c);
 }
 
 export function randomGapMs(db: Db): number {
