@@ -329,3 +329,30 @@ test("a schema failure records WHY it failed, not just that it did", async () =>
   assert.match(row.error_message, /must be boolean/,
     "the validation error is the only record of why a draft never appeared");
 });
+
+test("while the startup probe runs, NO_MODEL says 'not yet' rather than 'never'", async () => {
+  const empty = (): ModelSlots => ({
+    research: { active: null, ranking: [], status: "none" },
+    writing: { active: null, ranking: [], status: "none" },
+    enableExa: false, probedAt: null,
+  });
+  const probing = new LlmService({ client: () => client, slots: empty, probing: () => true });
+  await assert.rejects(
+    () => probing.run({ task: "email.draft", system: "s", prompt: "p" }),
+    (e: LlmError) => {
+      assert.equal(e.code, "NO_MODEL");
+      assert.match(e.message, /still checking|first run/i,
+        "a first-run user must not be told the app can never work");
+      return true;
+    },
+  );
+
+  const settled = new LlmService({ client: () => client, slots: empty, probing: () => false });
+  await assert.rejects(
+    () => settled.run({ task: "email.draft", system: "s", prompt: "p" }),
+    (e: LlmError) => {
+      assert.match(e.message, /opencode auth login/, "once probing is done, say how to fix it");
+      return true;
+    },
+  );
+});

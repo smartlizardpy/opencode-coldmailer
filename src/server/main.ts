@@ -67,7 +67,10 @@ export async function main(argv: string[] = []): Promise<void> {
   if (!slots?.research) slots = EMPTY_SLOTS;
 
   const bus = new EventBus();
-  const llm = new LlmService({ client: () => supervisor.client, slots: () => slots, db });
+  const llm = new LlmService({
+    client: () => supervisor.client, slots: () => slots, db,
+    probing: () => app.busy.has("probe"),
+  });
   const sender = new SendRunner(db, () => readSmtpConfig(db));
 
   const app: AppContext = {
@@ -96,12 +99,17 @@ export async function main(argv: string[] = []): Promise<void> {
 
       if (slots.writing.status !== "ok") {
         log("probing models (first run takes a minute)...");
+        // Register it the same way a route-triggered job is, so /api/health reports it. Without
+        // this the first run shows "no usable model" with nothing to say a probe is under way,
+        // and any request in that window fails with a NO_MODEL that looks permanent.
+        app.busy.set("probe", { label: "Probing models", startedAt: Date.now() });
         bus.emit("job:start", { key: "probe", label: "Probing models" });
         try {
           slots = await probeModels(supervisor.client!, { maxCandidates: 3 });
           setSetting(db, "model_slots", slots);
           log(`research=${slots.research.active?.modelID ?? "none"}  writing=${slots.writing.active?.providerID ?? "none"}/${slots.writing.active?.modelID ?? ""}`);
         } finally {
+          app.busy.delete("probe");
           bus.emit("job:end", { key: "probe" });
           bus.emit("models:changed", slots);
         }

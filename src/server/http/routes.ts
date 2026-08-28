@@ -147,27 +147,29 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.get("/api/interview/:productId", ({ params }: RouteCtx) =>
-    db.prepare("SELECT seq, role, content FROM interview_turn WHERE product_id=? ORDER BY seq").all(params.productId));
+    db.prepare("SELECT seq, role, content, field_hint AS topic FROM interview_turn WHERE product_id=? ORDER BY seq")
+      .all(params.productId));
 
   r.post("/api/interview/:productId/next", async ({ params, body }: RouteCtx) => {
     const productId = params.productId;
-    const turns = db.prepare("SELECT seq, role, content FROM interview_turn WHERE product_id=? ORDER BY seq")
-      .all(productId) as Array<{ seq: number; role: string; content: string }>;
+    // field_hint carries which topic each question was for, so coverage survives a restart.
+    const turns = db.prepare("SELECT seq, role, content, field_hint AS topic FROM interview_turn WHERE product_id=? ORDER BY seq")
+      .all(productId) as Array<{ seq: number; role: string; content: string; topic: string | null }>;
     if (typeof body.answer === "string" && body.answer.trim()) {
       db.prepare("INSERT INTO interview_turn (id,product_id,seq,role,content,created_at) VALUES (?,?,?,'user',?,?)")
         .run(ulid(), productId, turns.length, body.answer.trim(), now());
-      turns.push({ seq: turns.length, role: "user", content: body.answer.trim() });
+      turns.push({ seq: turns.length, role: "user", content: body.answer.trim(), topic: null });
     }
-    const r2 = await app.llm.run<{ done: boolean; question: string; reason?: string }>({
+    const r2 = await app.llm.run<{ done: boolean; question: string; topic?: string; is_follow_up?: boolean }>({
       task: "interview.next_question", system: P.INTERVIEW_SYSTEM,
       prompt: P.interviewNextPrompt(turns), schema: P.INTERVIEW_NEXT_SCHEMA,
       priority: "interactive", subject: { type: "product", id: productId },
     });
     if (!r2.value.done && r2.value.question) {
-      db.prepare("INSERT INTO interview_turn (id,product_id,seq,role,content,created_at) VALUES (?,?,?,'assistant',?,?)")
-        .run(ulid(), productId, turns.length, r2.value.question, now());
+      db.prepare("INSERT INTO interview_turn (id,product_id,seq,role,content,field_hint,created_at) VALUES (?,?,?,'assistant',?,?,?)")
+        .run(ulid(), productId, turns.length, r2.value.question, r2.value.topic || null, now());
     }
-    return { done: r2.value.done, question: r2.value.question, count: turns.length };
+    return { done: r2.value.done, question: r2.value.question, topic: r2.value.topic ?? null, count: turns.length };
   });
 
   r.post("/api/interview/:productId/finish", async ({ params }: RouteCtx) => {

@@ -75,6 +75,8 @@ export interface LlmResult<T = unknown> {
 export interface LlmServiceDeps {
   client: () => OpencodeClient | undefined;
   slots: () => ModelSlots;
+  /** True while the startup probe is still running, so NO_MODEL can say "not yet" not "never". */
+  probing?: () => boolean;
   db?: Db;
   queue?: LlmQueue;
   cooldowns?: Cooldowns;
@@ -127,13 +129,15 @@ export class LlmService {
     if (models.length === 0) {
       const slots = this.deps.slots();
       const code: LlmErrorCode = cfg.slot === "research" && slots.research.status === "none" ? "SEARCH_UNAVAILABLE" : "NO_MODEL";
+      const probing = this.deps.probing?.() ?? false;
       throw new LlmError({
         code,
         task: req.task,
-        message:
-          code === "SEARCH_UNAVAILABLE"
+        message: probing
+          ? "still checking which models are available - this takes a minute on the first run"
+          : code === "SEARCH_UNAVAILABLE"
             ? "no search-capable model available - websearch requires a free opencode/* model"
-            : "no usable model available",
+            : "no usable model available. Run `opencode auth login` in a terminal, then re-probe in Settings.",
       });
     }
 

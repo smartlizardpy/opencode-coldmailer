@@ -14,32 +14,47 @@ export const INTERVIEW_SYSTEM = `You are interviewing a founder about their busi
 
 Ask like a curious human, not like a marketer. You are BANNED from using these words and any close variant: "value proposition", "ICP", "ideal customer profile", "pain point", "target market", "solution", "leverage", "synergy", "unique selling point", "USP", "brand", "messaging".
 
-How to ask:
+## Cover the ground
+There are eight topics. Each question must target ONE of them, and you must say which:
+
+  last_customer  who last paid, and what they were trying to get done
+  alternative    what they tried before, and why it did not work
+  without_you    what they would be doing if they had never found you
+  surprise       what people are surprised by once they start working with you
+  bad_fit        who you would turn down
+  objection      the reason the last person who said no gave
+  reputation     how a happy customer described you to someone else
+  price          the smallest job worth doing, and what things cost
+
+You will be told which topics are already covered. NEVER ask about a covered topic again.
+Always pick an uncovered one. When all eight are covered, set done=true.
+
+## Following up
+At most ONE follow-up per topic, and only when the answer genuinely did not address it. A
+follow-up still belongs to the same topic. If the answer was partial but usable, take it and
+move on - the brief is written from the whole conversation, not from any single answer.
+Never repeat a question you have already asked, in any wording.
+
+## How to ask
 - One question at a time. Short. Conversational.
-- Ask about specific past events, never about abstractions. "Who was the last person who paid you?" not "who is your customer?".
-- Follow up when an answer is thin or vague. Ask for the concrete detail: what happened, what they said, what it cost.
+- Ask about specific past events, never about abstractions. "Who was the last person who paid
+  you?" not "who is your customer?".
 - Never ask something you could already infer from what they have told you.
-- Do not summarise their answers back to them. Just ask the next thing.
+- Do not summarise their answers back to them. Just ask the next thing.`;
 
-Good questions to draw from, adapted to what they have said:
-- Who was the last person who paid you, and what were they trying to get done that week?
-- What did they try before you, and why didn't it stick?
-- If they'd never found you, what would they be doing instead right now?
-- What surprises people once they start working with you?
-- Describe someone you'd turn down.
-- What reason did the last person who said no give?
-- How did your best customer describe you to someone else?
-- What's the smallest job you'll take that's still worth doing?
-
-Aim for 8 to 10 questions total, then stop.`;
+export const INTERVIEW_TOPICS = [
+  "last_customer", "alternative", "without_you", "surprise",
+  "bad_fit", "objection", "reputation", "price",
+] as const;
 
 export const INTERVIEW_NEXT_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["done", "question"],
+  required: ["done", "question", "topic"],
   properties: {
-    done: { type: "boolean", description: "true when you have enough to write the brief" },
+    done: { type: "boolean", description: "true once every topic is covered" },
     question: { type: "string", description: "the next question, or empty string when done" },
-    reason: { type: "string", description: "one short line on why you are asking this" },
+    topic: { type: "string", enum: [...INTERVIEW_TOPICS, ""], description: "which topic this question is for" },
+    is_follow_up: { type: "boolean" },
   },
 } as const;
 
@@ -49,7 +64,7 @@ export const PRODUCT_BRIEF_SCHEMA = {
              "objections", "proof_points", "disqualifiers", "signals", "price_anchor", "tone_sample"],
   properties: {
     name: { type: "string" },
-    one_liner: { type: "string", description: "what they do, in the founder's own plain words" },
+    one_liner: { type: "string", description: "WHAT THEY DO for people, in the founder's own plain words. Never a price. Never one customer's specific request." },
     description: { type: "string" },
     audience: {
       type: "object", additionalProperties: false, required: ["who", "where"],
@@ -58,7 +73,7 @@ export const PRODUCT_BRIEF_SCHEMA = {
         where: { type: "string", description: "geography, or empty if not geographic" },
       },
     },
-    job_to_be_done: { type: "string" },
+    job_to_be_done: { type: "string", description: "the general job customers hire them for, generalised from the stories - not one customer's specific errand" },
     before_state: { type: "string", description: "what life looks like before they buy" },
     objections: { type: "array", items: { type: "string" }, maxItems: 6 },
     proof_points: { type: "array", items: { type: "string" }, maxItems: 6 },
@@ -79,18 +94,67 @@ export const PRODUCT_BRIEF_SCHEMA = {
   },
 } as const;
 
-export function interviewNextPrompt(turns: Array<{ role: string; content: string }>): string {
-  if (turns.length === 0) return "Start the interview. Ask your first question.";
+export function interviewNextPrompt(
+  turns: Array<{ role: string; content: string; topic?: string | null }>,
+): string {
+  if (turns.length === 0) {
+    return `No questions asked yet. Every topic is uncovered: ${INTERVIEW_TOPICS.join(", ")}.
+Ask your first question.`;
+  }
   const transcript = turns.map((t) => `${t.role === "assistant" ? "You" : "Them"}: ${t.content}`).join("\n");
-  return `Transcript so far:\n\n${transcript}\n\nAsk the next question, or set done=true if you have enough.`;
+  const asked = turns.filter((t) => t.role === "assistant");
+  // A topic counts as covered once it has been asked about AND answered.
+  const covered = new Set<string>();
+  turns.forEach((t, i) => {
+    // Covered means asked AND answered: a question still awaiting a reply is not yet covered.
+    if (t.role === "assistant" && t.topic && turns[i + 1]?.role === "user") covered.add(t.topic);
+  });
+  const remaining = INTERVIEW_TOPICS.filter((t) => !covered.has(t));
+  return `Transcript so far:
+
+${transcript}
+
+Topics already covered (do NOT ask about these again): ${[...covered].join(", ") || "none yet"}
+Topics still uncovered: ${remaining.join(", ") || "none - set done=true"}
+
+Questions you have already asked, which you must not repeat in any wording:
+${asked.map((t) => `- ${t.content}`).join("\n")}
+
+Ask the next question about an UNCOVERED topic, or set done=true if none remain.`;
 }
 
 export function productBriefPrompt(turns: Array<{ role: string; content: string }>): string {
   const transcript = turns.map((t) => `${t.role === "assistant" ? "Q" : "A"}: ${t.content}`).join("\n");
-  return `Here is the full interview.\n\n${transcript}\n\nWrite the brief. Use their own words wherever you can - especially for one_liner and tone_sample. Do not invent proof points or numbers they did not give you. If something was never discussed, use an empty string or an empty array.`;
+  return `Here is the full interview.
+
+${transcript}
+
+Write the brief. Use their own words wherever you can, especially for tone_sample.
+
+Check two things before you answer:
+- Does one_liner say what they DO, rather than what it costs or what one customer asked for?
+- Is job_to_be_done the general job, rather than a single customer's specific errand?
+
+Do not invent proof points or numbers they did not give you. If something was never discussed,
+use an empty string or an empty array.`;
 }
 
-export const BRIEF_SYSTEM = "You turn an interview transcript into a structured brief. You never invent facts, numbers or claims that the founder did not say. Prefer their exact phrasing over polished marketing language.";
+export const BRIEF_SYSTEM = `You turn an interview transcript into a structured brief.
+
+Never invent facts, numbers or claims the founder did not say. Prefer their exact phrasing over
+polished marketing language.
+
+Two fields are routinely got wrong, so be deliberate about them:
+
+- one_liner is WHAT THEY DO for people. It is not a price, and it is not one customer's
+  request. "I build small websites for local businesses that need to be found online" is a
+  one-liner; "Four hundred quid for a small site" is a price and belongs in price_anchor.
+- job_to_be_done is the GENERAL job, generalised from the specific stories. If one customer
+  wanted a lunch menu online before summer, the job is getting a small business found online
+  and turning that into orders - not "get a lunch menu online before the summer".
+
+Everything else stays concrete and close to their words. Where a topic was never discussed, use
+an empty string or an empty array rather than filling it in from imagination.`;
 
 /* ---------------------------------------------------------------- discovery */
 
