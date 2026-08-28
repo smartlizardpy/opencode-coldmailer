@@ -8,7 +8,15 @@
  */
 import type { Db } from "./db/index.ts";
 
-export interface Funnel { discovered: number; researched: number; contacted: number; drafted: number; approved: number; sent: number; replied: number }
+/**
+ * The funnel changes unit halfway through, and pretending otherwise makes it lie: the first
+ * three stages count COMPANIES, the rest count EMAILS. Once follow-ups exist one company can
+ * account for several drafts, so the UI labels the unit rather than implying a single line.
+ */
+export interface Funnel {
+  discovered: number; researched: number; contacted: number;   // companies
+  drafted: number; approved: number; sent: number; replied: number;   // emails
+}
 
 export interface DashboardStats {
   funnel: Funnel;
@@ -41,7 +49,11 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
 
   const funnel: Funnel = {
     discovered: one(db, `SELECT COUNT(*) c FROM campaign_company ${ccScope}`, ...arg),
-    researched: one(db, `SELECT COUNT(*) c FROM campaign_company WHERE status NOT IN ('discovered','enriching') ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
+    // Researched means we actually fetched the site and judged it. A company we could not
+    // fetch was not researched, and counting it here would hide the drop it caused.
+    researched: one(db, `SELECT COUNT(*) c FROM campaign_company
+      WHERE status IN ('qualified','rejected','contacts_found','drafted','approved','sent','replied','bounced')
+      ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
     contacted: one(db, `SELECT COUNT(DISTINCT cc.id) c FROM campaign_company cc JOIN contact ct ON ct.company_id=cc.company_id ${campaignId ? "WHERE cc.campaign_id=?" : ""}`, ...arg),
     drafted: one(db, `SELECT COUNT(*) c FROM email_draft WHERE status NOT IN ('discarded') ${scope}`, ...arg),
     approved: one(db, `SELECT COUNT(*) c FROM email_draft WHERE status='approved' ${scope}`, ...arg),

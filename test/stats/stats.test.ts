@@ -137,3 +137,19 @@ test("every export shape returns rows for a real campaign", () => {
   assert.equal((EXPORTS.drafts(db, ids.c) as unknown[]).length, 1);
   assert.equal((EXPORTS.sends(db, ids.c) as unknown[]).length, 0);
 });
+
+test("a company that could not be fetched does not count as researched", () => {
+  const { db, ids } = world();
+  db.prepare("UPDATE campaign_company SET status='failed' WHERE id=?").run(ids.cc);
+  const s = dashboardStats(db);
+  assert.equal(s.funnel.discovered, 1);
+  assert.equal(s.funnel.researched, 0,
+    "counting a failed fetch as researched hides the drop it caused, which is the one thing the funnel is for");
+});
+
+test("a company rejected after being fetched DOES count as researched", () => {
+  const { db, ids } = world();
+  db.prepare("UPDATE campaign_company SET status='rejected' WHERE id=?").run(ids.cc);
+  assert.equal(dashboardStats(db).funnel.researched, 1,
+    "we did fetch and judge it - the drop belongs at the next stage, not this one");
+});

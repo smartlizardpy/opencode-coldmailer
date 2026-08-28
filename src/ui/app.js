@@ -299,10 +299,12 @@ async function render() {
 
 /* ───────────────────────────────────────────────────────── dashboard */
 
+// The unit changes halfway down: companies become emails once drafting starts, and with
+// follow-ups one company can account for several. Labelling it is the honest option.
 const FUNNEL_STAGES = [
-  ["discovered", "Discovered", ""], ["researched", "Researched", ""],
-  ["contacted", "Have contacts", ""], ["drafted", "Drafted", ""],
-  ["approved", "Approved", "accent"], ["sent", "Sent", "ok"], ["replied", "Replied", "ok"],
+  ["discovered", "Companies found", ""], ["researched", "Researched", ""],
+  ["contacted", "With a contact", ""], ["drafted", "Emails drafted", ""],
+  ["approved", "Approved", "accent"], ["sent", "Sent", "ok"], ["replied", "Replies", "ok"],
 ];
 
 async function renderDashboard() {
@@ -377,11 +379,13 @@ async function renderDashboard() {
 
     <div class="grid2" style="align-items:start">
       <div class="card">
-        <div class="card-head"><h2>Pipeline</h2>
+        <div class="card-head"><h2>Pipeline <span class="tag">companies, then emails</span></h2>
           <span class="card-actions"><button class="btn sm ghost" data-go="campaigns">Open campaign</button></span></div>
         <div class="funnel">
           ${FUNNEL_STAGES.map(([k, label, tone], i) => {
-            const prev = i > 0 ? f[FUNNEL_STAGES[i - 1][0]] : null;
+            // Only compare within a unit - "3 dropped" between companies and emails is meaningless.
+            const sameUnit = i !== 3;
+            const prev = i > 0 && sameUnit ? f[FUNNEL_STAGES[i - 1][0]] : null;
             const drop = prev != null && prev > 0 && f[k] < prev ? prev - f[k] : 0;
             return `<div class="fstage">
               <span class="fstage-name">${esc(label)}</span>
