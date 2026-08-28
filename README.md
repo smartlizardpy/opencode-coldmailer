@@ -60,6 +60,33 @@ A sidebar app shell, not a settings page with a send button.
 
 `⌘K` / `Ctrl K` opens a command palette. `?` lists the shortcuts.
 
+## Finding a contact
+
+Most of the difficulty in cold email is not writing it, it is finding who to write to. Of six
+Turkish news sites tested, five initially came back as "no publishable address" and only one of
+those was actually true.
+
+- **Contact pages are matched in seven languages.** An English-only matcher reduces every
+  non-English site to a homepage-only crawl and then reports it as having no address — a wrong
+  answer that looks like a correct one. `/iletisim`, `/künye`, `/impressum`, `/contacto` and
+  their relatives are all followed, and `/%C4%B0leti%C5%9Fim` folds to the same word.
+- **Cloudflare-obfuscated addresses are decoded.** Cloudflare replaces the address with a hex
+  string and decodes it in the browser; it is a single-byte XOR, so it decodes server-side. Four
+  of those six sites published their address this way.
+- **Addresses in JSON-LD are read** — common on news sites and invisible to a human reading the page.
+- **If the homepage nav is JavaScript-built**, the site's own sitemap is consulted for contact pages.
+- **A transient network error is retried**, because one dropped connection is not evidence that a
+  company has no website.
+- **The web provider's address is not the company's.** Sites routinely publish their CMS vendor's
+  support address next to their own. Addresses are classified own-domain, freemail or
+  third-party, and a third-party address is only ever a last resort.
+- **When there genuinely is no address** — many sites take enquiries through a form — it says so,
+  and you can add a contact by hand. It is recorded as such, never dressed up as something the
+  site published.
+
+Every contact carries the page it came from and one of four tiers: `published`, `generic`
+(info@ / hello@), `inferred` (a pattern guess, off by default) or `manual`.
+
 ## Quality flags
 
 Cold email fails in predictable ways, so the ones a careful reader would catch are detected when
@@ -93,6 +120,8 @@ You can see this in the UI: every draft has a **Sources** button showing the quo
   restarting the app cannot get round it.
 - Run a shell command. The research agent is sandboxed at four independent layers; see below.
 - Follow up anyone who replied, or anyone on the never-contact list.
+- Email the same person from two different campaigns. Two unrelated cold emails from one sender
+  is the fastest way to be marked as spam, and nothing else would have caught it.
 - Add an opt-out footer, unless you switch it on in Settings. It's off by default.
 - Cost you anything. There are no paid APIs in this product, at all.
 
@@ -119,6 +148,10 @@ npm run verify:sandbox
 | `coldcall repair` | Resolve references left dangling by an editor outside the app |
 | `coldcall where` | Print where your data lives |
 | `coldcall --help` | The list above |
+
+Companies can be pasted as a bare list, as `domain Name` lines, or imported from a CSV — it works
+out which. Companies, contacts, drafts and the send log all export back out as CSV, and the export
+re-imports cleanly.
 
 `coldcall doctor` on a working install:
 
