@@ -1,7 +1,7 @@
 /** The JSON API. Every long job runs in the background and reports progress over SSE. */
 import type { Router, RouteCtx } from "./server.ts";
 import type { AppContext } from "../context.ts";
-import { readImapConfig, readSmtpConfig, type SmtpSettings } from "../context.ts";
+import { readImapConfig, readSmtpConfig, sanitizeSmtp, type SmtpSettings } from "../context.ts";
 import { ulid, now, tx } from "../db/index.ts";
 import { getSetting, setSetting, type SendingSettings } from "../db/settings.ts";
 import { probeModels } from "../opencode/models.ts";
@@ -82,7 +82,9 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   /* ----------------------------------------------------------- settings */
   r.get("/api/settings", async () => ({
-    smtp: getSetting<SmtpSettings>(db, "smtp", {}),
+    // Sanitised on the way out as well as on the way in. A settings row written by an older
+    // build may still be carrying a password, and this response goes to a browser.
+    smtp: sanitizeSmtp(getSetting<Record<string, unknown>>(db, "smtp", {})),
     sending: getSetting<SendingSettings>(db, "sending", {} as SendingSettings),
     opencode: getSetting(db, "opencode", {}),
     hasPassword: !!(await getSecret(db, "smtp.password")),
@@ -94,10 +96,10 @@ export function registerRoutes(r: Router, app: AppContext): void {
     if (body.sending) setSetting(db, "sending", { ...getSetting(db, "sending", {}), ...body.sending });
     if (body.opencode) setSetting(db, "opencode", { ...getSetting(db, "opencode", {}), ...body.opencode });
     if (body.smtp) {
-      const prev = getSetting<SmtpSettings>(db, "smtp", {});
+      const prev = getSetting<Record<string, unknown>>(db, "smtp", {});
       // Never echo or store the password here - it goes to the Keychain only.
-      const { password, ...rest } = body.smtp;
-      setSetting(db, "smtp", { ...prev, ...rest });
+      const { password } = body.smtp;
+      setSetting(db, "smtp", sanitizeSmtp({ ...prev, ...body.smtp }));
       if (password) {
         const storage = await setSecret(db, "smtp.password", password);
         app.log(`SMTP password stored: ${storageDescription(storage)}`);
@@ -118,11 +120,14 @@ export function registerRoutes(r: Router, app: AppContext): void {
     const imapRes = await verifyImap({ host: s.imapHost ?? GMAIL_IMAP.host, port: s.imapPort ?? GMAIL_IMAP.port,
       secure: s.imapSecure ?? GMAIL_IMAP.secure, user: s.user }, password);
 
-    setSetting(db, "smtp", {
+    // `s` was built by spreading the request body, so it is holding the password the caller
+    // just typed. Persisting it unsanitised put the plaintext app password in the settings
+    // row, where GET /api/settings then handed it straight back to the browser.
+    setSetting(db, "smtp", sanitizeSmtp({
       ...s, configured: smtpRes.ok,
       lastVerifiedAt: smtpRes.ok ? now() : null,
       lastError: smtpRes.ok ? null : smtpRes.error ?? null,
-    });
+    }));
     if (smtpRes.ok && password) await setSecret(db, "smtp.password", password);
     return { smtp: smtpRes, imap: imapRes };
   });

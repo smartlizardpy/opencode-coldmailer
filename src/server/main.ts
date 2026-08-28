@@ -9,6 +9,7 @@ import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { openDb } from "./db/index.ts";
+import { evictLeakedPassword } from "./mail/secrets.ts";
 import { integrityReport, migrate, recoverAfterCrash, repairOrphans, schemaVersion } from "./db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "./db/settings.ts";
 import { backfillQuality, QUALITY_VERSION } from "./research/quality.ts";
@@ -141,6 +142,15 @@ export async function main(argv: string[] = []): Promise<void> {
   const backfilled = backfillQuality(db as never, storedQuality < QUALITY_VERSION);
   if (backfilled) log(`re-checked quality on ${backfilled} draft version(s)`);
   if (storedQuality < QUALITY_VERSION) setSetting(db, "quality_version", QUALITY_VERSION);
+
+  // A password left in the settings row by an older build is moved out before anything can
+  // read it back. Awaited, because the settings route is served moments later.
+  const evicted = await evictLeakedPassword(db);
+  if (evicted !== "none") {
+    log(evicted === "moved"
+      ? "moved an app password out of coldcall.db and into the secret store"
+      : "removed a stale app password from coldcall.db (the stored one was kept)");
+  }
 
   const integrity = integrityReport(db);
   if (!integrity.ok) {

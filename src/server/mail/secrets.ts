@@ -84,3 +84,39 @@ export function storageDescription(storage: Storage): string {
     ? "Stored in your macOS login Keychain. Any process running as you can still read it."
     : `Stored UNENCRYPTED in ${secretsFile()} (file mode 0600).`;
 }
+
+/**
+ * Move a password that an older build wrote into the `setting` table out to the secret store.
+ *
+ * Until this was caught, `POST /api/settings/test` spread the request body - password included -
+ * back into the smtp settings row, so the plaintext app password sat in `coldcall.db` and was
+ * echoed to the browser on every settings load. Fixing the handler stops it happening again;
+ * this cleans up the databases where it already did, which is the half that matters to anyone
+ * who has been running the app.
+ */
+export async function evictLeakedPassword(db: Db): Promise<"none" | "moved" | "dropped"> {
+  const row = db.prepare("SELECT value FROM setting WHERE key='smtp'").get() as { value?: string } | undefined;
+  if (!row?.value) return "none";
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(row.value); } catch { return "none"; }
+
+  const leaked = ["password", "pass", "appPassword", "secret", "token"]
+    .filter((k) => k in parsed && parsed[k] != null && parsed[k] !== "");
+  if (!leaked.length) return "none";
+
+  const password = String(parsed[leaked[0]]);
+  for (const k of leaked) delete parsed[k];
+  // Only adopt it if nothing is stored yet - an existing secret is the newer of the two,
+  // and overwriting a working password with a stale one would break sending silently.
+  const already = await getSecret(db, "smtp.password");
+  let outcome: "moved" | "dropped" = "dropped";
+  if (!already) { await setSecret(db, "smtp.password", password); outcome = "moved"; }
+
+  db.prepare("UPDATE setting SET value=? WHERE key='smtp'").run(JSON.stringify(parsed));
+  // Rewriting the row is not the same as removing the bytes: a shortened cell can leave the
+  // original page on the freelist, where the password is still readable with `strings`.
+  // VACUUM rebuilds the file, which is the only way to actually be rid of it. It runs once,
+  // only on the boot that finds a leak.
+  try { db.exec("VACUUM"); } catch { /* a locked db just means the next boot does it */ }
+  return outcome;
+}

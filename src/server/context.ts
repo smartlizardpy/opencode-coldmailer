@@ -39,6 +39,27 @@ export interface SmtpSettings {
   configured?: boolean; lastVerifiedAt?: number | null; lastError?: string | null;
 }
 
+/**
+ * Keys that must never reach the `setting` table or a JSON response.
+ *
+ * The mailbox password lives in the Keychain and the DB holds a pointer - that is the whole
+ * reason `coldcall.db` is safe to back up or attach to a bug report. It only stays true if
+ * every write goes through here, because one handler that spreads a request body into the
+ * settings row undoes it silently and the value then echoes back on every settings load.
+ */
+const SECRET_KEYS = ["password", "pass", "appPassword", "secret", "token"];
+
+export function sanitizeSmtp<T extends Record<string, unknown>>(input: T): SmtpSettings {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input)) if (!SECRET_KEYS.includes(k)) out[k] = v;
+  return out as SmtpSettings;
+}
+
+/** True when a settings object is carrying something it should not be. */
+export function carriesSecret(input: Record<string, unknown>): boolean {
+  return SECRET_KEYS.some((k) => k in input && input[k] != null && input[k] !== "");
+}
+
 export function readSmtpConfig(db: Db): SmtpConfig | undefined {
   const s = getSetting<SmtpSettings>(db, "smtp", {});
   if (!s.user || !s.configured) return undefined;
