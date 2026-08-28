@@ -27,10 +27,45 @@ const CONTACT_WORDS = [
   // French / Spanish / Italian / Portuguese
   "contacto", "contatti", "contato", "quienes-somos", "nosotros", "chi-siamo",
   "a-propos", "qui-sommes-nous", "equipe", "equipo",
+  // common compounds, listed explicitly because matching is exact
+  "contact-us", "contact-me", "about-us", "our-team", "meet-the-team", "the-team",
+  "iletisim-bilgileri", "hakkimizda-2", "kunye-2",
   // legal pages that must carry contact details in the EU/TR
   "imprint", "legal", "mentions-legales", "aviso-legal",
 ];
-const CONTACT_PATH_RE = new RegExp(`(${CONTACT_WORDS.join("|")})`, "i");
+
+/**
+ * Path segments that mean "a list of things", not "a page about us".
+ *
+ * /kategori/iletisim is a category listing of communications articles, not a contact page,
+ * and crawling it wastes a fetch on someone else's server for text we cannot use.
+ */
+const LISTING_SEGMENTS = new Set([
+  "haber", "haberler", "news", "blog", "kategori", "category", "etiket", "tag", "tags",
+  "arsiv", "archive", "urun", "urunler", "product", "products", "search", "ara", "author", "yazar",
+]);
+/**
+ * Matched against whole path SEGMENTS, not as a substring of the path.
+ *
+ * A substring match crawls news articles: Turkish headlines routinely contain "hakkında"
+ * ("about"), so /haber/2218767/kedi-olumuyle-ilgili-sorusturma-hakkinda looked like an About
+ * page. That wastes fetches on a stranger's server and feeds article text to the contact
+ * extractor as though it were a staff page.
+ */
+const CONTACT_SEGMENTS = new Set(CONTACT_WORDS);
+
+/**
+ * True when a segment of the path IS a contact-page word.
+ *
+ * Exact, not a prefix: "iletisim-teknolojileri" is a subject, not a contact page. The compound
+ * forms that are genuinely contact pages are listed in CONTACT_WORDS instead of being inferred,
+ * which is a shorter list than the false positives a prefix match produces.
+ */
+export function pathHasContactSegment(foldedPath: string): boolean {
+  const segments = foldedPath.split("/").filter(Boolean).map((s) => s.replace(/\.(html?|php|aspx?)$/i, ""));
+  if (segments.some((seg) => LISTING_SEGMENTS.has(seg))) return false;
+  return segments.some((seg) => CONTACT_SEGMENTS.has(seg));
+}
 
 /**
  * Fold a URL path to plain ASCII so "/İletişim" and "/iletisim" match the same words.
@@ -218,7 +253,7 @@ export function pickContactPages(links: string[], baseUrl: string, limit = 6): s
     try { rawPath = new URL(link).pathname; } catch { continue; }
     if (rawPath === "/" || rawPath === "") continue;
     const path = foldPath(rawPath);
-    if (!CONTACT_PATH_RE.test(path)) continue;
+    if (!pathHasContactSegment(path)) continue;
     if (path.split("/").filter(Boolean).length > 3) continue;   // avoid deep blog archives
 
     let score = 100 - path.length;

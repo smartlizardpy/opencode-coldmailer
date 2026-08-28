@@ -295,3 +295,43 @@ t2("a missing sitemap is not an error", async () => {
     assert.deepEqual(await sitemapContactUrls(f, `http://127.0.0.1:${port}/`, () => true), []);
   } finally { server.close(); }
 });
+
+/* Contact-page precision. Every one of these was observed on a real crawl. */
+t2("news articles are not mistaken for About pages", () => {
+  const base = "https://ankaramasasi.com.tr/";
+  // Turkish headlines routinely contain "hakkında" ("about"), and a substring match crawled
+  // four of these on a single site - fetches wasted on a stranger's server, and article text
+  // handed to the contact extractor as though it were a staff page.
+  const articles = [
+    "https://ankaramasasi.com.tr/haber/2218767/kedi-olumuyle-ilgili-sorusturma-hakkinda",
+    "https://ankaramasasi.com.tr/haber/2218600/arkadas-sayisi-hakkinda-detay",
+  ];
+  assert.deepEqual(pickContactPages(articles, base, 10), []);
+});
+
+t2("a category listing is not a contact page", () => {
+  assert.deepEqual(pickContactPages(["https://x.com/kategori/iletisim-teknolojileri"], "https://x.com/", 5), []);
+  assert.deepEqual(pickContactPages(["https://x.com/etiket/hakkimizda"], "https://x.com/", 5), []);
+  assert.deepEqual(pickContactPages(["https://x.com/blog/about-our-new-office"], "https://x.com/", 5), []);
+});
+
+t2("the real contact pages on that same site are still found", () => {
+  const base = "https://ankaramasasi.com.tr/";
+  const picked = pickContactPages([
+    "https://ankaramasasi.com.tr/sayfa/iletisim",
+    "https://ankaramasasi.com.tr/sayfa/kunye",
+  ], base, 10).map((u) => new URL(u).pathname);
+  assert.deepEqual(picked.sort(), ["/sayfa/iletisim", "/sayfa/kunye"]);
+});
+
+t2("a file extension does not stop a contact page being recognised", () => {
+  for (const p of ["/iletisim.html", "/kunye.php", "/contact.aspx"]) {
+    assert.equal(pickContactPages([`https://x.com${p}`], "https://x.com/", 5).length, 1, p);
+  }
+});
+
+t2("common English compounds are recognised", () => {
+  for (const p of ["/contact-us", "/about-us", "/our-team", "/meet-the-team"]) {
+    assert.equal(pickContactPages([`https://x.com${p}`], "https://x.com/", 5).length, 1, p);
+  }
+});
