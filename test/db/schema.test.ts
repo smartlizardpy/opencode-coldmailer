@@ -272,3 +272,30 @@ test("sending starts PAUSED - nothing leaves the machine without an explicit sta
   const db = fresh();
   assert.equal(getSetting<{ paused: boolean }>(db, "sending", { paused: false }).paused, true);
 });
+
+test("deleting a campaign takes its drafts and sends but leaves the companies", () => {
+  const db = fresh();
+  const { campaignId, companyId, ccId, contactId, t } = seedChain(db);
+  const draftId = ulid(), versionId = ulid();
+  db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+    .run(draftId, campaignId, ccId, contactId, t, t);
+  db.prepare("INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,created_at) VALUES (?,?,?,?,?,'llm',?)")
+    .run(versionId, draftId, 1, "s", "b", t);
+  db.prepare("INSERT INTO send_log (id,draft_id,version_id,campaign_id,contact_id,to_email,from_email,subject,message_id,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,'sent',?)")
+    .run(ulid(), draftId, versionId, campaignId, contactId, "a@example.com", "m@m.com", "s", "<d@cc>", t);
+  db.prepare("INSERT INTO claim (id,company_id,claim,source_url,quote,verified,created_at) VALUES (?,?,?,?,?,1,?)")
+    .run(ulid(), companyId, "fact", "https://example.com", "quote", t);
+
+  db.prepare("DELETE FROM campaign WHERE id=?").run(campaignId);
+
+  const n = (t2: string) => (db.prepare(`SELECT COUNT(*) c FROM ${t2}`).get() as any).c;
+  assert.equal(n("email_draft"), 0, "drafts belong to the campaign");
+  assert.equal(n("email_draft_version"), 0);
+  assert.equal(n("send_log"), 0);
+  assert.equal(n("campaign_company"), 0);
+  // Researched evidence is shared and expensive to rebuild - it must survive.
+  assert.equal(n("company"), 1, "companies are shared across campaigns");
+  assert.equal(n("contact"), 1, "a contact belongs to the company, not the campaign");
+  assert.equal(n("claim"), 1, "verified facts cost a crawl to obtain and are reusable");
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+});

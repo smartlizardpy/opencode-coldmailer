@@ -6,7 +6,7 @@ import { ulid, now, tx } from "../db/index.ts";
 import { getSetting, setSetting, type SendingSettings } from "../db/settings.ts";
 import { probeModels } from "../opencode/models.ts";
 import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/secrets.ts";
-import { verifySmtp, GMAIL_PRESET } from "../mail/smtp.ts";
+import { verifySmtp, sendMail, newMessageId, GMAIL_PRESET } from "../mail/smtp.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
@@ -129,6 +129,41 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   r.post("/api/settings/forget-password", async () => { await deleteSecret(db, "smtp.password"); return { ok: true }; });
 
+  /**
+   * Send one message to the configured address and nowhere else.
+   *
+   * Verifying the connection proves the credentials work; it does not prove a message actually
+   * arrives, which is the part that surprises people. Without this the only way to find out is
+   * to send a real cold email to a stranger. The recipient is taken from the stored settings,
+   * never from the request, so this endpoint cannot be pointed at anyone else.
+   */
+  r.post("/api/settings/send-test", async () => {
+    const cfg = readSmtpConfig(db);
+    if (!cfg) throw bad("configure and test the mailbox first", "NO_SMTP");
+    const password = await getSecret(db, "smtp.password");
+    if (!password) throw bad("no password stored", "NO_PASSWORD");
+
+    const messageId = newMessageId(cfg.fromEmail);
+    const when = new Date().toLocaleString();
+    await sendMail(cfg, password, {
+      to: cfg.fromEmail,                      // deliberately not settable by the caller
+      subject: "coldcall test message",
+      text: [
+        `This is a test from coldcall, sent at ${when}.`,
+        "",
+        "If you are reading this, sending works: the credentials are right and mail is",
+        "actually being delivered, not just accepted by the server.",
+        "",
+        "Nothing was sent to anyone else. coldcall only sends drafts you have approved,",
+        "one at a time, up to the daily cap you set.",
+      ].join("\n"),
+      messageId,
+    });
+    // Deliberately not written to send_log: this is not outreach and must not count against
+    // the daily cap or appear in the campaign's history.
+    return { ok: true, to: cfg.fromEmail, messageId };
+  });
+
   r.get("/api/integrity", () => integrityReport(db));
   r.post("/api/integrity/repair", () => {
     const resolved = repairOrphans(db);
@@ -239,6 +274,35 @@ export function registerRoutes(r: Router, app: AppContext): void {
     const c = db.prepare("SELECT * FROM campaign WHERE id=?").get(params.id);
     if (!c) throw bad("campaign not found", "NOT_FOUND", 404);
     return c;
+  });
+
+  /**
+   * Delete a campaign and everything that belongs to it.
+   *
+   * Companies and their researched facts are NOT deleted: they are shared across campaigns, and
+   * throwing away verified evidence because one campaign ended would mean re-crawling sites we
+   * have already been polite to once. The send log goes with the campaign, so the daily cap is
+   * computed from what remains - deleting a campaign you already sent from will free capacity,
+   * which is why it asks for the name first.
+   */
+  r.post("/api/campaigns/:id/delete", ({ params, body }: RouteCtx) => {
+    const c = db.prepare("SELECT name FROM campaign WHERE id=?").get(params.id) as { name: string } | undefined;
+    if (!c) throw bad("campaign not found", "NOT_FOUND", 404);
+    if (String(body.confirm ?? "").trim() !== c.name) {
+      throw bad(`type the campaign name exactly ("${c.name}") to confirm`, "CONFIRM_REQUIRED");
+    }
+    const sent = (db.prepare("SELECT COUNT(*) n FROM send_log WHERE campaign_id=? AND status='sent'").get(params.id) as any).n;
+    const removed = tx(db, () => {
+      const counts = {
+        companies: (db.prepare("SELECT COUNT(*) n FROM campaign_company WHERE campaign_id=?").get(params.id) as any).n,
+        drafts: (db.prepare("SELECT COUNT(*) n FROM email_draft WHERE campaign_id=?").get(params.id) as any).n,
+        sent,
+      };
+      db.prepare("DELETE FROM campaign WHERE id=?").run(params.id);   // cascades
+      return counts;
+    });
+    app.bus.emit("companies:changed", {});
+    return { ok: true, removed };
   });
 
   r.post("/api/campaigns/:id/settings", ({ params, body }: RouteCtx) => {

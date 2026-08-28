@@ -1094,8 +1094,11 @@ async function renderSettings() {
       </div>
       <div class="row" style="margin-top:var(--s4)">
         <button class="btn" id="btnTest">${icon("shield-check")} Save &amp; test connection</button>
+        ${m.configured ? `<button class="btn ghost" id="btnSendTest">${icon("send")} Send a test to myself</button>` : ""}
         <span id="testResult" class="cellsub"></span>
       </div>
+      ${m.configured ? `<p class="card-note">The test message goes to <b>${esc(m.user ?? "")}</b> and nowhere else.
+        Testing the connection proves the credentials work; only a real message proves it arrives.</p>` : ""}
       <p class="card-note">${s.hasPassword
         ? esc(s.secretStorage === "keychain"
             ? "Password is in your macOS login Keychain. Any process running as you can still read it — unavoidable for an app that sends mail unattended."
@@ -1160,6 +1163,13 @@ async function renderSettings() {
     } catch (e) { fail(e); $("#testResult").textContent = ""; }
     finally { b.disabled = false; }
   };
+  $("#btnSendTest")?.addEventListener("click", async () => {
+    if (!confirm(`Send one test message to ${m.user}?\n\nIt goes to your own address only, and is not recorded against your daily cap.`)) return;
+    const b = $("#btnSendTest"); b.disabled = true; b.innerHTML = `<span class="spinner"></span> Sending…`;
+    try { const r = await api("/api/settings/send-test", {}); toast(`Sent to ${r.to} — check your inbox`); }
+    catch (e) { fail(e); }
+    finally { b.disabled = false; b.innerHTML = `${icon("send")} Send a test to myself`; }
+  });
   $("#btnSaveSending").onclick = async () => {
     try {
       await api("/api/settings", { sending: {
@@ -1276,7 +1286,17 @@ function campaignSettingsDialog(camp) {
     </div>
     <label class="check" style="margin-top:var(--s3)">
       <input type="checkbox" id="sInferred" ${camp.allow_inferred_emails ? "checked" : ""}>
-      Allow guessed addresses when nobody publishes one</label>`,
+      Allow guessed addresses when nobody publishes one</label>
+    <details style="margin-top:var(--s5)">
+      <summary style="color:var(--bad)">Delete this campaign</summary>
+      <p class="card-note">Removes its drafts, send log and replies. The companies and the facts
+        researched about them are kept — they are shared with your other campaigns.</p>
+      <div class="row">
+        <input id="sConfirm" aria-label="Type the campaign name to confirm"
+          placeholder="Type &ldquo;${esc(camp.name)}&rdquo; to confirm" style="flex:1;min-width:200px">
+        <button class="btn danger" id="btnDeleteCamp">Delete</button>
+      </div>
+    </details>`,
     async () => {
       await api(`/api/campaigns/${camp.id}/settings`, {
         name: $("#sName").value, goal: $("#sGoal").value, target_description: $("#sTarget").value,
@@ -1285,6 +1305,15 @@ function campaignSettingsDialog(camp) {
       });
       toast("Saved"); go("campaigns");
     });
+  $("#btnDeleteCamp")?.addEventListener("click", async () => {
+    try {
+      const r = await api(`/api/campaigns/${camp.id}/delete`, { confirm: $("#sConfirm").value });
+      toast(`Deleted — ${r.removed.companies} companies unlinked, ${r.removed.drafts} drafts removed`);
+      $("#modal").innerHTML = "";
+      S.campaign = null;
+      go("campaigns");
+    } catch (e) { fail(e); }
+  });
 }
 
 function exportDialog(campaignId) {
