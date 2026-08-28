@@ -73,6 +73,89 @@ export function migrate(db: Db, dir?: string): number[] {
   return ran;
 }
 
+/**
+ * Report rows whose parent no longer exists.
+ *
+ * The app always opens SQLite with foreign_keys=ON, so it cannot create these itself. Anything
+ * else touching the file can: a sqlite3 shell (where foreign keys are OFF by default), a
+ * restored backup, a sync tool. The symptom is not an error - it is a draft whose contact has
+ * vanished, which then fails somewhere far away with a confusing message. Better to say so at
+ * boot, in one line, than to let it surface as a mystery later.
+ */
+export function integrityReport(db: Db): { ok: boolean; violations: Array<{ table: string; count: number }> } {
+  const rows = db.prepare("PRAGMA foreign_key_check").all() as Array<{ table?: string; "table": string }>;
+  const byTable = new Map<string, number>();
+  for (const r of rows) {
+    const t = (r as { table: string }).table ?? "unknown";
+    byTable.set(t, (byTable.get(t) ?? 0) + 1);
+  }
+  return {
+    ok: rows.length === 0,
+    violations: [...byTable.entries()].map(([table, count]) => ({ table, count })).sort((a, b) => b.count - a.count),
+  };
+}
+
+/**
+ * Resolve dangling references. Only ever called when the user asks: an orphan may be the only
+ * remaining record of something, and silently deleting it at boot would be worse than the
+ * inconsistency.
+ *
+ * Returns the number of VIOLATIONS resolved, which is not the same as rows deleted - a
+ * reference declared ON DELETE SET NULL is nulled and its row kept.
+ */
+export function repairOrphans(db: Db): number {
+  const count = (): number => (db.prepare("PRAGMA foreign_key_check").all() as unknown[]).length;
+  const before = count();
+  if (before === 0) return 0;
+
+  return tx(db, () => {
+    // Deleting a parent creates fresh orphans one level down, so this runs until the count
+    // stops changing rather than once in a guessed order.
+    // A reference declared ON DELETE SET NULL must be NULLED, not used as a reason to delete
+    // the row: a claim whose cached page was removed is still a real verified claim, and
+    // deleting it would destroy evidence an email may already be citing.
+    db.exec(`
+      UPDATE claim               SET source_page_id = NULL WHERE source_page_id IS NOT NULL AND source_page_id NOT IN (SELECT id FROM source_page);
+      UPDATE contact             SET source_page_id = NULL WHERE source_page_id IS NOT NULL AND source_page_id NOT IN (SELECT id FROM source_page);
+      UPDATE source_page         SET company_id     = NULL WHERE company_id     IS NOT NULL AND company_id     NOT IN (SELECT id FROM company);
+      UPDATE email_draft_version SET llm_call_id    = NULL WHERE llm_call_id    IS NOT NULL AND llm_call_id    NOT IN (SELECT id FROM llm_call);
+      UPDATE email_draft         SET follows_send_id= NULL WHERE follows_send_id IS NOT NULL AND follows_send_id NOT IN (SELECT id FROM send_log);
+      UPDATE reply               SET llm_call_id    = NULL WHERE llm_call_id    IS NOT NULL AND llm_call_id    NOT IN (SELECT id FROM llm_call);
+    `);
+
+    for (let pass = 0; pass < 6; pass++) {
+      const start = count();
+      db.exec(`
+        DELETE FROM campaign_company
+          WHERE company_id NOT IN (SELECT id FROM company)
+             OR campaign_id NOT IN (SELECT id FROM campaign);
+        DELETE FROM contact       WHERE company_id NOT IN (SELECT id FROM company);
+        DELETE FROM claim         WHERE company_id NOT IN (SELECT id FROM company);
+        DELETE FROM email_draft
+          WHERE contact_id NOT IN (SELECT id FROM contact)
+             OR campaign_company_id NOT IN (SELECT id FROM campaign_company)
+             OR campaign_id NOT IN (SELECT id FROM campaign);
+        DELETE FROM email_draft_version WHERE draft_id NOT IN (SELECT id FROM email_draft);
+        DELETE FROM send_log
+          WHERE draft_id NOT IN (SELECT id FROM email_draft)
+             OR version_id NOT IN (SELECT id FROM email_draft_version)
+             OR contact_id NOT IN (SELECT id FROM contact)
+             OR campaign_id NOT IN (SELECT id FROM campaign);
+        DELETE FROM reply
+          WHERE (send_log_id IS NOT NULL AND send_log_id NOT IN (SELECT id FROM send_log))
+             OR (contact_id  IS NOT NULL AND contact_id  NOT IN (SELECT id FROM contact))
+             OR (campaign_id IS NOT NULL AND campaign_id NOT IN (SELECT id FROM campaign));
+        DELETE FROM interview_turn WHERE product_id NOT IN (SELECT id FROM product);
+        DELETE FROM sequence_step  WHERE campaign_id NOT IN (SELECT id FROM campaign);
+        DELETE FROM tool_call_log  WHERE llm_call_id NOT IN (SELECT id FROM llm_call);
+      `);
+      const now2 = count();
+      if (now2 === 0 || now2 === start) break;
+    }
+    return before - count();
+  });
+}
+
 export function schemaVersion(db: Db): number {
   const row = db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number | null };
   return row?.v ?? 0;

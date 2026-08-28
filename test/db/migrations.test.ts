@@ -107,3 +107,60 @@ test("follow-up steps become possible only after the upgrade", () => {
   assert.doesNotThrow(() => db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,step_number,created_at,updated_at) VALUES (?,?,?,?,2,?,?)")
     .run(ulid(), d.campaign_id, d.campaign_company_id, d.contact_id, now(), now()));
 });
+
+/* Integrity: rows whose parent has gone. */
+import { integrityReport, repairOrphans } from "../../src/server/db/migrate.ts";
+
+test("a clean database reports no integrity problems", () => {
+  const db = v1WithData(); migrate(db);
+  const r = integrityReport(db);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.violations, []);
+});
+
+test("orphans created outside the app are detected and can be repaired", () => {
+  const db = v1WithData(); migrate(db);
+  const before = counts(db);
+  // Exactly what a sqlite3 shell does: foreign keys are OFF there, so no cascade fires.
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.prepare("DELETE FROM contact WHERE id = (SELECT id FROM contact LIMIT 1)").run();
+  db.exec("PRAGMA foreign_keys = ON");
+
+  const bad = integrityReport(db);
+  assert.equal(bad.ok, false, "an orphaned draft must not pass silently");
+  assert.ok(bad.violations.reduce((n, v) => n + v.count, 0) > 0);
+
+  const removed = repairOrphans(db);
+  assert.ok(removed > 0);
+  assert.equal(integrityReport(db).ok, true, "repair must actually resolve them");
+  // Repair removes only what is unreachable, never a row with a live parent.
+  assert.equal(counts(db).company, before.company);
+  assert.equal(counts(db).campaign_company, before.campaign_company);
+});
+
+test("repair on a clean database is a no-op", () => {
+  const db = v1WithData(); migrate(db);
+  const before = counts(db);
+  assert.equal(repairOrphans(db), 0);
+  assert.deepEqual(counts(db), before);
+});
+
+test("a claim whose cached page was deleted keeps the claim and nulls the reference", () => {
+  const db = v1WithData(); migrate(db);
+  const claimsBefore = counts(db).claim;
+  // Point every claim at a real page first, the way enrichment does.
+  db.prepare("UPDATE claim SET source_page_id = (SELECT id FROM source_page sp WHERE sp.company_id = claim.company_id LIMIT 1)").run();
+  assert.equal(integrityReport(db).ok, true);
+
+  // Now clear the page cache the way a sqlite3 shell would: foreign keys off, no SET NULL fires.
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.prepare("DELETE FROM source_page").run();
+  db.exec("PRAGMA foreign_keys = ON");
+  assert.equal(integrityReport(db).ok, false);
+
+  repairOrphans(db);
+  assert.equal(integrityReport(db).ok, true);
+  assert.equal(counts(db).claim, claimsBefore,
+    "deleting a verified claim because its cached page went would destroy evidence an email may already cite");
+  assert.equal((db.prepare("SELECT COUNT(*) c FROM claim WHERE source_page_id IS NOT NULL").get() as any).c, 0);
+});

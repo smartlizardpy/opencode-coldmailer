@@ -13,6 +13,7 @@ import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, pre
 import { composeDraft, saveHumanEdit } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
 import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
+import { integrityReport, repairOrphans } from "../db/migrate.ts";
 import { DEFAULT_FOLLOWUPS, dueFollowUps, listSteps, seedDefaultSteps, setSteps, upcomingFollowUps } from "../queue/sequences.ts";
 
 const bad = (msg: string, code = "BAD_REQUEST", status = 400) => Object.assign(new Error(msg), { code, status });
@@ -126,6 +127,13 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.post("/api/settings/forget-password", async () => { await deleteSecret(db, "smtp.password"); return { ok: true }; });
+
+  r.get("/api/integrity", () => integrityReport(db));
+  r.post("/api/integrity/repair", () => {
+    const resolved = repairOrphans(db);
+    app.bus.emit("companies:changed", {});
+    return { resolved, after: integrityReport(db) };
+  });
 
   r.post("/api/models/probe", () => background(app, "probe", "Probing models", async () => {
     const client = app.supervisor.client;

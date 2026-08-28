@@ -9,7 +9,7 @@ import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { openDb } from "./db/index.ts";
-import { migrate, recoverAfterCrash, schemaVersion } from "./db/migrate.ts";
+import { integrityReport, migrate, recoverAfterCrash, schemaVersion } from "./db/migrate.ts";
 import { seedDefaults, getSetting, setSetting } from "./db/settings.ts";
 import { backfillQuality } from "./research/quality.ts";
 import { OpencodeSupervisor } from "./opencode/supervisor.ts";
@@ -48,6 +48,14 @@ export async function main(argv: string[] = []): Promise<void> {
   seedDefaults(db);
   const backfilled = backfillQuality(db as never);
   if (backfilled) log(`backfilled quality checks on ${backfilled} existing draft version(s)`);
+
+  const integrity = integrityReport(db);
+  if (!integrity.ok) {
+    log(`WARNING: ${integrity.violations.reduce((n, v) => n + v.count, 0)} row(s) reference something that no longer exists ` +
+        `(${integrity.violations.map((v) => `${v.count} in ${v.table}`).join(", ")}). ` +
+        `This cannot happen through the app - something else edited ${join(home, "coldcall.db")}. ` +
+        `Settings has a Repair button, or run: coldcall repair`);
+  }
 
   const recovered = recoverAfterCrash(db);
   if (recovered.jobsReset || recovered.sendsFailed) {

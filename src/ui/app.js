@@ -1040,13 +1040,24 @@ async function nextQuestion(answer) {
 /* ───────────────────────────────────────────────────────── settings */
 
 async function renderSettings() {
-  const [s, health, sup] = await Promise.all([
+  const [s, health, sup, integrity] = await Promise.all([
     api("/api/settings"), api("/api/health"), api("/api/suppression"),
+    api("/api/integrity").catch(() => ({ ok: true, violations: [] })),
   ]);
   const m = s.smtp ?? {}, g = s.sending ?? {};
   const r = health.model.research, w = health.model.writing;
 
   $("#content").innerHTML = page(`
+    ${integrity.ok ? "" : `<div class="card" style="border-color:var(--bad)">
+      <div class="card-head"><h2>Database integrity</h2><span class="tag bad">needs attention</span></div>
+      <p class="card-note" style="margin-top:0">
+        ${num(integrity.violations.reduce((n, v) => n + v.count, 0))} row(s) point at something that no longer
+        exists (${integrity.violations.map((v) => `${num(v.count)} in ${esc(v.table)}`).join(", ")}).
+        coldcall cannot create these — it always opens the database with foreign keys on — so something
+        else edited the file. Repairing clears the reference where it is optional and keeps the row;
+        only genuinely unreachable rows are deleted.</p>
+      <div class="row"><button class="btn danger" id="btnRepair">${icon("shield-check")} Repair</button></div>
+    </div>` }
     <div class="card">
       <div class="card-head"><h2>Models</h2>
         <span class="card-actions"><button class="btn ghost sm" id="btnProbe">${icon("refresh")} Re-probe</button></span></div>
@@ -1120,6 +1131,11 @@ async function renderSettings() {
     </div>
   `);
 
+  $("#btnRepair")?.addEventListener("click", async () => {
+    if (!confirm("Resolve references that point at something no longer in the database?\n\nRows whose reference is optional are kept and the reference cleared; only genuinely unreachable rows are deleted. This cannot be undone.")) return;
+    try { const r = await api("/api/integrity/repair", {}); toast(`Resolved ${r.resolved} dangling reference(s)`); renderSettings(); }
+    catch (e) { fail(e); }
+  });
   $("#btnProbe").onclick = async () => { try { await api("/api/models/probe", {}); toast("Probing models…"); } catch (e) { fail(e); } };
   $("#btnTest").onclick = async () => {
     const b = $("#btnTest"); b.disabled = true; $("#testResult").textContent = "Testing…";
