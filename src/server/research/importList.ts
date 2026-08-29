@@ -35,6 +35,11 @@ const URL_LIKE = /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i;
 const DOMAIN_HEADERS = ["website", "domain", "url", "site", "web", "link", "website_url", "homepage"];
 const NAME_HEADERS = ["name", "company", "company name", "business", "title", "organisation", "organization"];
 
+/** Trailing commas, semicolons and wrapping brackets are punctuation, not part of a domain. */
+function stripPunctuation(token: string): string {
+  return token.replace(/^[<([{"']+/, "").replace(/[>)\]}"'.,;:]+$/, "");
+}
+
 function firstUrlLike(cells: string[]): number {
   return cells.findIndex((c) => URL_LIKE.test(c.trim()));
 }
@@ -45,6 +50,15 @@ export function parseCompanyList(text: string, limit = 500): ImportResult {
 
   const table = parseCsv(trimmed);
   const looksTabular = table.length > 0 && table.some((r) => r.length > 1);
+
+  // "a.com, b.com" parses as one row of two fields, so the table branch below would call the
+  // second domain the first one's NAME and quietly import half the list under a wrong name.
+  // When every cell is a domain there are no names here, only companies.
+  const cells = table.flat().map((c) => stripPunctuation(c.trim())).filter(Boolean);
+  if (cells.length > 1 && cells.every((c) => URL_LIKE.test(c))) {
+    const rows = cells.slice(0, limit).map((website) => ({ website }));
+    return { rows, skipped: [], format: cells.length === table.length ? "lines" : "csv" };
+  }
 
   if (looksTabular) {
     const header = table[0].map((h) => h.trim().toLowerCase());
@@ -66,21 +80,44 @@ export function parseCompanyList(text: string, limit = 500): ImportResult {
         if (!website) continue;
         if (!URL_LIKE.test(website)) { skipped.push(`${website} - not a domain`); continue; }
         const name = nameIdx >= 0 ? (r[nameIdx] ?? "").trim() : "";
-        rows.push({ website, name: name && name !== website ? name : undefined });
+        // A cell that is itself a domain is another company, not this one's name.
+        const usable = name && name !== website && !URL_LIKE.test(stripPunctuation(name));
+        rows.push({ website, name: usable ? name : undefined });
         if (rows.length >= limit) break;
       }
       return { rows, skipped, format: "csv" };
     }
   }
 
-  // One per line: "domain" or "domain Some Name".
+  // One per line. The domain can be anywhere on the line, because people paste all of these:
+  //
+  //   ankaramasasi.com.tr
+  //   ankaramasasi.com.tr Ankara Masasi
+  //   Ankara Masasi ankaramasasi.com.tr
+  //   Ankara Masasi - ankaramasasi.com.tr
+  //   - ankaramasasi.com.tr
+  //   1. ankaramasasi.com.tr
+  //
+  // Requiring the first token to be the domain rejected four of those six outright, and this
+  // is the path people are on precisely when discovery has not worked for them.
   const rows: ImportedRow[] = [], skipped: string[] = [];
   for (const raw of trimmed.split(/[\n,]+/)) {
-    const line = raw.trim();
+    // Leading list markers: "-", "*", "•", "1.", "1)".
+    const line = raw.trim().replace(/^\s*(?:[-*\u2022\u00b7]|\d+[.)])\s+/, "").trim();
     if (!line) continue;
-    const [first, ...rest] = line.split(/\s+/);
-    if (!URL_LIKE.test(first)) { skipped.push(`${line.slice(0, 60)} - not a domain`); continue; }
-    rows.push({ website: first, name: rest.join(" ") || undefined });
+
+    const tokens = line.split(/\s+/);
+    const at = tokens.findIndex((t) => URL_LIKE.test(stripPunctuation(t)));
+    if (at < 0) { skipped.push(`${line.slice(0, 60)} - not a domain`); continue; }
+
+    const website = stripPunctuation(tokens[at]);
+    // Everything that is not the domain is the name, minus the separator people put between
+    // them. A dash on its own is punctuation, not part of anyone's company name.
+    const name = tokens.filter((_, i) => i !== at).join(" ")
+      .replace(/^\s*[-\u2013\u2014:|]\s*/, "").replace(/\s*[-\u2013\u2014:|]\s*$/, "")
+      // "Ankara Masasi (ankaramasasi.com.tr)" leaves the brackets behind once the domain goes.
+      .replace(/^[([{"']+/, "").replace(/[)\]}"']+$/, "").trim();
+    rows.push({ website, name: name && name !== website ? name : undefined });
     if (rows.length >= limit) break;
   }
   return { rows, skipped, format: "lines" };

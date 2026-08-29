@@ -78,3 +78,53 @@ test("the import is bounded", () => {
   const many = Array.from({ length: 900 }, (_, i) => `c${i}.com`).join("\n");
   assert.equal(parseCompanyList(many, 500).rows.length, 500);
 });
+
+/* The shapes people actually paste. This is the fallback path when discovery has not worked
+   for them, so rejecting a whole paste over its formatting is the worst possible moment. */
+
+const websites = (text: string) => parseCompanyList(text).rows.map((r) => r.website);
+const named = (text: string) => parseCompanyList(text).rows.map((r) => `${r.website}|${r.name ?? ""}`);
+
+test("the domain can be anywhere on the line, not only first", () => {
+  // Requiring the first token to be the domain rejected the whole line, and "Name domain" is
+  // how anyone who wrote the list by hand tends to write it.
+  assert.deepEqual(named("Ankara Masasi ankaramasasi.com.tr"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+  assert.deepEqual(named("ankaramasasi.com.tr Ankara Masasi"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+});
+
+test("a separator between the name and the domain is not part of the name", () => {
+  for (const sep of ["-", "–", "—", ":", "|"]) {
+    assert.deepEqual(named(`Ankara Masasi ${sep} ankaramasasi.com.tr`), ["ankaramasasi.com.tr|Ankara Masasi"], sep);
+  }
+});
+
+test("bulleted and numbered lists import", () => {
+  // Copying out of a document, a notes app or a chat answer produces exactly these.
+  assert.deepEqual(websites("- ankaramasasi.com.tr\n- sporankara.org"), ["ankaramasasi.com.tr", "sporankara.org"]);
+  assert.deepEqual(websites("* ankaramasasi.com.tr\n• sporankara.org"), ["ankaramasasi.com.tr", "sporankara.org"]);
+  assert.deepEqual(websites("1. ankaramasasi.com.tr\n2) sporankara.org"), ["ankaramasasi.com.tr", "sporankara.org"]);
+});
+
+test("brackets around the domain or the name are dropped", () => {
+  assert.deepEqual(named("Ankara Masasi (ankaramasasi.com.tr)"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+  assert.deepEqual(named("* Ankara Masasi - ankaramasasi.com.tr"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+});
+
+test("a comma-separated line of domains is several companies, not one with an odd name", () => {
+  // "a.com, b.com" parses as one CSV row of two fields, and the second was being taken as the
+  // first one's name - importing half the list under a name that is somebody else's domain.
+  assert.deepEqual(websites("ankaramasasi.com.tr, sporankara.org"), ["ankaramasasi.com.tr", "sporankara.org"]);
+  assert.deepEqual(parseCompanyList("a.com, b.com, c.com").rows.every((r) => r.name === undefined), true);
+});
+
+test("a real CSV still gets its names", () => {
+  assert.deepEqual(named("name,website\nAnkara Masasi,ankaramasasi.com.tr"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+  assert.deepEqual(named("Ankara Masasi,ankaramasasi.com.tr"), ["ankaramasasi.com.tr|Ankara Masasi"]);
+});
+
+test("a line with no domain in it is skipped with a reason, not silently", () => {
+  const r = parseCompanyList("Here are some sites:\n- ankaramasasi.com.tr");
+  assert.deepEqual(r.rows.map((x) => x.website), ["ankaramasasi.com.tr"]);
+  assert.equal(r.skipped.length, 1);
+  assert.match(r.skipped[0], /not a domain/);
+});
