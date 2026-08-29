@@ -53,6 +53,17 @@ UI-safe (>=3.0): bg/primary, text/primary, surface/primary, primary/border
 Encoded as `--on-accent`, which resolves to `on-primary` in light and `bg` in dark. Never
 hardcode white on accent.
 
+## The other pairing that flips between modes
+
+A panel recessed inside a `.card` (which is `raised`) needs a different ground per mode:
+- **light**: `raised`/`surface` is 1.12 — surface is the more distinct of the two.
+- **dark**: `raised`/`surface` is only 1.07, while `raised`/`bg` is 1.20. Dark recesses toward
+  the page colour instead, which is also what people expect: inset means darker in a dark UI.
+
+Encoded as `--inset`. Both are decorative boundaries with no WCAG floor, and both carry a
+`--border` hairline as well — the token exists so the recession is visible at all in dark mode,
+not to satisfy a contrast rule.
+
 ## Type
 
 | role | family |

@@ -31,7 +31,7 @@ only if you don't already have ≥ 22.13.0 (the first version where `node:sqlite
    customer: partners, press, content sources. This is the filter discovery actually uses.
 3. **Find companies.** opencode's web search, or paste a list. Nothing is researched until you
    tick it. After a company's site is fetched, it is re-judged against the target and dropped if
-   it turns out to be the wrong kind of organisation.
+   it turns out to be the wrong kind of organisation — see The targeting gate below.
 4. **Find the right people.** A bounded, robots-aware crawl of each company's own site —
    homepage plus up to six contact/about/team pages, matched in seven languages — then the model
    picks who actually decides on *this* ask. Every contact carries the URL it came from.
@@ -44,6 +44,48 @@ only if you don't already have ≥ 22.13.0 (the first version where `node:sqlite
 8. **Replies.** IMAP matches replies to the thread and drafts a response you can edit or ignore.
    A bounce is not a reply and an out-of-office is not a reply; both are sorted out and only a
    person answering stops the sequence.
+
+## The targeting gate
+
+Search finds things that are *about* your subject. That is not the same as being the *kind* of
+organisation you want, and the gap between those two is where cold outreach goes wrong. A
+campaign looking for small local news sites once drafted a genuinely well-written email to a
+tennis academy: both are about sport, only one publishes news.
+
+So after a site is fetched, before anyone is contacted, it has to survive two independent
+checks:
+
+- **Kind.** The model has to name the kind you asked for and the kind it actually found, then
+  match them. Naming both is the point — a single "does this fit?" boolean is exactly the call a
+  model will talk itself into for a near-miss.
+- **Fit.** A per-campaign score floor, default 45. A number does not negotiate.
+
+Both are recorded, so a rejection reads as *"not the target kind — looking for small local news
+website, this is a tennis academy"* rather than a silent disappearance.
+
+**Check one site first.** Under *Find companies* → *Check one site before running the whole
+campaign*, paste a domain and see the gate's reasoning in a single fetch. It commits nothing,
+and shares the page cache with the real crawl, so checking a site and then running it for real
+does not fetch it twice. Against the case this was built for:
+
+| site | verdict | read as |
+|---|---|---|
+| `pta.com.tr` | rejected, fit 0 | tennis academy |
+| `bethellandco.co.uk` | rejected, fit 0 | architectural design firm |
+| `thenorthernecho.co.uk` | **included**, fit 88 | local news website |
+
+That last row is the one that matters. A gate that rejects everything is not strict, it is
+broken.
+
+**When it is wrong.** A stricter gate makes a wrong rejection more likely, not less. *Include
+anyway* on a rejected row overrules it, keeps the recorded reason, badges the row `overruled`,
+and survives re-running the pipeline. (*Retry* is not an override — it clears the rejection and
+re-runs the same gate against the same site, reaching the same verdict.)
+
+**When the whole campaign is wrong.** The campaign page groups rejections by the kind that was
+rejected. "23 rejected, mostly tennis academies" tells you the target is being read as a topic
+rather than a kind of organisation — which a count alone cannot say. Past 60% rejected it says
+so plainly instead of just reporting the number.
 
 ## The screens
 

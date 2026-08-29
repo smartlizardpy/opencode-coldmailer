@@ -12,6 +12,12 @@
   --text:#161b23; --bg:#fafcff; --surface:#edf2fa; --primary:#2f6ecf; --on-primary:#fff;
   --secondary:#cddffc; --accent:#bb5603; --border:#dce1e9;
   --on-accent:var(--on-primary);          /* light: white on orange is legal (4.72) */
+  /* A panel recessed INSIDE a .card, which is --raised. The right colour flips by mode:
+     light  raised #fff     vs surface #edf2fa = 1.12  (surface is the more distinct)
+     dark   raised #20252c  vs surface #1b1f25 = 1.07, vs bg #101419 = 1.20
+     so dark recesses toward the page colour instead, which is also the convention people
+     expect - inset means darker in a dark UI. Decorative boundary, carried by --border too. */
+  --inset:var(--surface);
   --muted:#5c6675; --raised:#fff;
   --ok:#1c7551; --ok-bg:#e6f4ee; --warn:#8a5a12; --warn-bg:#fdf4e3; --bad:#9d2f21; --bad-bg:#fdeeec;
   --shadow-sm:0 1px 2px rgba(16,20,25,.06);
@@ -32,6 +38,7 @@
     --text:#ebf2fe; --bg:#101419; --surface:#1b1f25; --primary:#3574d6; --on-primary:#fff;
     --secondary:#1c2e4a; --accent:#ed7a30; --border:#272b31;
     --on-accent:var(--bg);              /* dark: white on orange FAILS; near-black is text-safe */
+    --inset:var(--bg);
     --muted:#98a3b3; --raised:#20252c;
     --ok:#5cc79b; --ok-bg:#132a22; --warn:#e0b567; --warn-bg:#2a2317; --bad:#f08a7b; --bad-bg:#2c1a17;
     --shadow-sm:0 1px 2px rgba(0,0,0,.4);
@@ -42,7 +49,7 @@
 }
 :root[data-theme="dark"]{
   --text:#ebf2fe; --bg:#101419; --surface:#1b1f25; --primary:#3574d6; --on-primary:#fff;
-  --secondary:#1c2e4a; --accent:#ed7a30; --border:#272b31; --on-accent:var(--bg);
+  --secondary:#1c2e4a; --accent:#ed7a30; --border:#272b31; --on-accent:var(--bg); --inset:var(--bg);
   --muted:#98a3b3; --raised:#20252c;
   --ok:#5cc79b; --ok-bg:#132a22; --warn:#e0b567; --warn-bg:#2a2317; --bad:#f08a7b; --bad-bg:#2c1a17;
   --shadow-sm:0 1px 2px rgba(0,0,0,.4);
@@ -459,7 +466,7 @@ details[open] summary::before{transform:rotate(90deg)}
 /* Targeting dry-run verdict. The two kinds sit side by side because the whole point is the
    comparison — "looking for a news site, this is a tennis academy" is the finding. */
 .verdict { margin-top: var(--s3); padding: var(--s4); border-radius: var(--r);
-  border: 1px solid var(--border); background: var(--surface); }
+  border: 1px solid var(--border); background: var(--inset); }
 .verdict.pass { border-color: var(--ok); }
 .verdict.fail { border-color: var(--bad); }
 .verdict-head { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin-bottom: var(--s3); }
@@ -471,7 +478,7 @@ details[open] summary::before{transform:rotate(90deg)}
 /* Rejection summary. Quiet by default; it only raises its voice when the gate is throwing
    away most of what the search found, which is a targeting problem worth interrupting for. */
 .reject-summary { margin-top: var(--s4); padding: var(--s4); border-radius: var(--r);
-  border: 1px solid var(--border); background: var(--surface); }
+  border: 1px solid var(--border); background: var(--inset); }
 .reject-summary.loud { border-color: var(--warn); background: var(--warn-bg); }
 .rs-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
   flex-wrap: wrap; font-size: 14px; }
