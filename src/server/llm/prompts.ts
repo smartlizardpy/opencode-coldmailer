@@ -408,7 +408,14 @@ Write ${args.instruction ? "one revised variant" : "two variants"}.`;
 
 /* ---------------------------------------------------------------- replies */
 
-export const REPLY_CLASSIFY_SYSTEM = "You classify replies to cold emails. Be conservative: only mark unsubscribe when they clearly want no further contact.";
+export const REPLY_CLASSIFY_SYSTEM = `You classify replies to cold emails.
+
+Be conservative: only mark unsubscribe when they clearly want no further contact. Marking it
+wrongly suppresses a real lead permanently.
+
+Write the summary in the SAME LANGUAGE as the reply you are reading. The person reading it is
+the one who sent the original email, and switching to English for one reply out of three makes
+the list look like it was written by three different tools.`;
 
 export const REPLY_CLASSIFY_SCHEMA = {
   type: "object", additionalProperties: false, required: ["classification", "confidence", "summary"],
