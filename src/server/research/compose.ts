@@ -121,7 +121,7 @@ export async function composeDraft(
       const version = maxV.v + i + 1;
       const versionId = ulid();
       const message = v.body.trim();
-      const flags = checkQuality({ subject: v.subject, body: message, citedClaims: used.length });
+      const flags = checkQuality({ subject: v.subject, body: message, citedClaims: used.length, step });
       db.prepare(
         `INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,llm_call_id,
            edit_note,personalization,word_count,quality_flags,signature_mode,created_at)
@@ -142,13 +142,18 @@ export async function composeDraft(
 }
 
 /** Save a human edit as a new version. Human edits carry no citations - the person owns them. */
+/** Which email in the sequence a draft is, so the quality rules match its job. */
+function stepOfDraft(db: Db, draftId: string): number {
+  return (db.prepare("SELECT step_number FROM email_draft WHERE id=?").get(draftId) as { step_number?: number } | undefined)?.step_number ?? 1;
+}
+
 export function saveHumanEdit(db: Db, draftId: string, subject: string, body: string, note?: string): number {
   return tx(db, () => {
     const maxV = db.prepare("SELECT COALESCE(MAX(version),0) v FROM email_draft_version WHERE draft_id=?").get(draftId) as { v: number };
     const version = maxV.v + 1;
     // A human edit is checked too, but the citation flag is not applied: the person writing it
     // owns what they wrote, and we did not give them claim ids to cite.
-    const flags = checkQuality({ subject, body, citedClaims: 1 });
+    const flags = checkQuality({ subject, body, citedClaims: 1, step: stepOfDraft(db, draftId) });
     // A human edit is stored exactly as typed: if someone deletes the signature we must not
     // put it back, so their text is treated as the complete email.
     db.prepare(

@@ -149,3 +149,62 @@ test("no label contains the separator the UI joins with", () => {
   ];
   for (const l of LABELS) assert.ok(!l.includes("—"), `"${l}" contains the separator`);
 });
+
+/* The rules have to match the job the email is doing. */
+
+// The real step-3 email the composer produced, following its own default instruction:
+// "one or two sentences, say plainly that you will stop here, leave the door open without any
+// pressure, no new pitch".
+const SIGN_OFF = `Burada bırakıyorum; ileride Ankara spor sonuçları için hazır yayınlanabilir bir akışa ihtiyaç duyarsanız ulaşabilirsiniz.
+
+Uygun olursa 15 dakikalık bir görüşme için dönüş yapmanız yeterli.`;
+
+test("a closing email that does exactly what it was told is not flagged", () => {
+  // It used to collect three flags - no_citations, too_short and no_ask - one of which blocks
+  // a bulk approve. The checker was calling the product's own best output broken, on every
+  // single sign-off, and the only way to send one was to ignore the warning.
+  assert.deepEqual(flagsOf({ subject: "spor akışı", body: SIGN_OFF, citedClaims: 0, step: 3 }), []);
+});
+
+test("the same text as a FIRST email is still wrong, and still blocks", () => {
+  // Relaxing the rules for a sign-off must not relax them for a first touch: with no citation,
+  // no ask and nothing specific, this is exactly the mail-merge the flags exist to catch.
+  const flags = flagsOf({ subject: "spor akışı", body: SIGN_OFF, citedClaims: 0, step: 1 });
+  assert.ok(flags.includes("no_citations"));
+  assert.ok(flags.includes("no_ask"));
+  assert.equal(isBlocking(flags), true);
+});
+
+test("a follow-up still has to ask for something, but need not re-cite", () => {
+  // Repeating the first email's quote is what makes a sequence read like a mail-merge, so a
+  // missing citation is fine from step 2 on. Not asking anything is still worth surfacing.
+  const flags = flagsOf({ subject: "spor akışı", body: SIGN_OFF, citedClaims: 0, step: 2 });
+  assert.equal(flags.includes("no_citations"), false);
+  assert.ok(flags.includes("no_ask"));
+  assert.equal(isBlocking(flags), false, "advisory, not blocking");
+});
+
+test("the length floor moves with the step", () => {
+  const twenty = "kelime ".repeat(20).trim();
+  assert.ok(flagsOf({ subject: "s", body: twenty, citedClaims: 1, step: 1 }).includes("too_short"));
+  assert.equal(flagsOf({ subject: "s", body: twenty, citedClaims: 1, step: 2 }).includes("too_short"), false);
+  assert.equal(flagsOf({ subject: "s", body: twenty, citedClaims: 1, step: 3 }).includes("too_short"), false);
+  // A sign-off can be short, but not empty.
+  assert.ok(flagsOf({ subject: "s", body: "Tamam.", citedClaims: 1, step: 3 }).includes("too_short"));
+});
+
+test("an over-long email is too long whatever step it is", () => {
+  const long = "kelime ".repeat(200).trim();
+  for (const step of [1, 2, 3]) {
+    assert.ok(flagsOf({ subject: "s", body: long, citedClaims: 1, step }).includes("too_long"), `step ${step}`);
+  }
+});
+
+test("a missing step is treated as a first email", () => {
+  // Every caller passes one now, but defaulting to the strictest reading is the safe way to
+  // be wrong.
+  assert.deepEqual(
+    flagsOf({ subject: "spor akışı", body: SIGN_OFF, citedClaims: 0 }),
+    flagsOf({ subject: "spor akışı", body: SIGN_OFF, citedClaims: 0, step: 1 }),
+  );
+});

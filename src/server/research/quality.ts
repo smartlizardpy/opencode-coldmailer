@@ -78,20 +78,38 @@ export function stripSignature(body: string): string {
   return blocks.join("\n\n");
 }
 
+/**
+ * A step-3 email is a sign-off, and the rules for a first touch are wrong for it.
+ *
+ * The default step-3 instruction is "one or two sentences, say plainly that you will stop
+ * here, leave the door open without any pressure, no new pitch". An email that follows it
+ * perfectly was getting three flags - no_citations, too_short and no_ask - one of which
+ * blocks a bulk approve. So the checker was calling the product's own best output broken,
+ * on every single closing email, and the only way to send one was to override the warning.
+ */
 export function checkQuality(args: {
   subject: string; body: string; citedClaims: number;
+  /** Which email in the sequence this is. 1 is the first touch. */
+  step?: number;
 }): QualityCheck[] {
   const out: QualityCheck[] = [];
   const body = args.body.toLowerCase();
   const subject = args.subject.trim();
   const prose = stripSignature(args.body);
   const words = countWords(prose);
+  const step = args.step ?? 1;
+  const isSignOff = step >= 3;
 
-  if (args.citedClaims === 0) {
+  // A follow-up cites the same page the first email did; repeating the quote is what makes a
+  // sequence read like a mail-merge. A sign-off cites nothing by design.
+  if (args.citedClaims === 0 && step === 1) {
     out.push({ flag: "no_citations", detail: "it will read as a mail-merge" });
   }
   if (words > 130) out.push({ flag: "too_long", detail: `${words} words — past about 120 it gets skimmed` });
-  if (words < 25) out.push({ flag: "too_short", detail: `${words} words` });
+  // Two or three sentences is the instruction for a follow-up and one or two for a sign-off,
+  // so the floor moves with the step rather than calling every one of them too short.
+  const floor = isSignOff ? 10 : step === 2 ? 18 : 25;
+  if (words < floor) out.push({ flag: "too_short", detail: `${words} words` });
 
   for (const phrase of FLATTERY) {
     if (body.includes(phrase)) { out.push({ flag: "flattery", detail: `"${phrase}"` }); break; }
@@ -105,8 +123,9 @@ export function checkQuality(args: {
   for (const phrase of PLACEHOLDER) {
     if (body.includes(phrase)) { out.push({ flag: "placeholder", detail: `"${phrase}"` }); break; }
   }
-  // A question mark is the cheapest proxy for "is there an ask at all".
-  if (!/[?？]/.test(prose) && !/\b(uygun mu|olur mu|paylaşabilir|gönderebilir)\b/i.test(prose)) {
+  // A question mark is the cheapest proxy for "is there an ask at all". A sign-off is exempt:
+  // asking again is the one thing it is explicitly told not to do.
+  if (!isSignOff && !/[?？]/.test(prose) && !/\b(uygun mu|olur mu|paylaşabilir|gönderebilir)\b/i.test(prose)) {
     out.push({ flag: "no_ask", detail: "the reader is not asked to do anything" });
   }
   if (subject.length > 60) out.push({ flag: "subject_too_long", detail: `${subject.length} characters` });
@@ -133,24 +152,28 @@ export function isBlocking(flags: QualityFlag[]): boolean {
  * Bumped whenever the checks or their wording change, so existing drafts are re-checked once
  * instead of showing flags produced by an older version of the rules.
  */
-export const QUALITY_VERSION = 2;
+// Bumped so every existing draft is re-checked: follow-ups and sign-offs were all carrying
+// flags written by rules that only ever applied to a first touch.
+export const QUALITY_VERSION = 3;
 
 export function backfillQuality(db: {
   prepare: (sql: string) => { all: (...a: unknown[]) => unknown[]; run: (...a: unknown[]) => unknown; get?: (...a: unknown[]) => unknown };
 }, force = false): number {
   const rows = db.prepare(
     force
-      ? `SELECT v.id, v.subject, v.body_text, v.personalization
-         FROM email_draft_version v WHERE length(v.body_text) > 0`
-      : `SELECT v.id, v.subject, v.body_text, v.personalization
-         FROM email_draft_version v WHERE v.word_count = 0 AND length(v.body_text) > 0`,
-  ).all() as Array<{ id: string; subject: string; body_text: string; personalization: string }>;
+      ? `SELECT v.id, v.subject, v.body_text, v.personalization, d.step_number
+         FROM email_draft_version v JOIN email_draft d ON d.id = v.draft_id
+         WHERE length(v.body_text) > 0`
+      : `SELECT v.id, v.subject, v.body_text, v.personalization, d.step_number
+         FROM email_draft_version v JOIN email_draft d ON d.id = v.draft_id
+         WHERE v.word_count = 0 AND length(v.body_text) > 0`,
+  ).all() as Array<{ id: string; subject: string; body_text: string; personalization: string; step_number: number }>;
 
   let done = 0;
   for (const r of rows) {
     let cited = 0;
     try { cited = (JSON.parse(r.personalization || "[]") as unknown[]).length; } catch { cited = 0; }
-    const flags = checkQuality({ subject: r.subject, body: r.body_text, citedClaims: cited });
+    const flags = checkQuality({ subject: r.subject, body: r.body_text, citedClaims: cited, step: r.step_number });
     db.prepare("UPDATE email_draft_version SET word_count=?, quality_flags=? WHERE id=?")
       .run(countWords(r.body_text), JSON.stringify(flags), r.id);
     done++;
