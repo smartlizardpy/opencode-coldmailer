@@ -31,6 +31,33 @@ function getCampaign(db: Db, campaignId: string) {
  * Falling back to product signals for a campaign with a different audience is how a search
  * for news sites comes back full of sports academies.
  */
+/**
+ * Whether the qualification gate rejects a company, and why.
+ *
+ * Pure and separate from the database so the decision itself is testable. Two independent
+ * reasons: the model's own kind judgement, and a numeric floor the model cannot talk itself
+ * past. The floor exists because `matches_target` is one boolean and a topical near-miss is
+ * exactly the case a model will rationalise - which is how a campaign for small local news
+ * sites reached a tennis academy.
+ */
+export interface GateInput {
+  matchesTarget: boolean; fitScore: number; floor: number;
+  targetKind?: string; entityKind?: string;
+}
+export function gateDecision(g: GateInput): { rejected: boolean; reason?: string } {
+  if (!g.matchesTarget) {
+    return {
+      rejected: true,
+      reason: `not the target kind - looking for ${g.targetKind?.trim() || "the target kind"}, this is a ${g.entityKind?.trim() || "different kind of organisation"}`,
+    };
+  }
+  const fit = Number.isFinite(g.fitScore) ? g.fitScore : 0;
+  if (fit < g.floor) {
+    return { rejected: true, reason: `fit ${Math.round(fit)} is below this campaign's floor of ${g.floor}` };
+  }
+  return { rejected: false };
+}
+
 export function targetOf(campaign: any, product: any): string {
   const explicit = String(campaign.target_description ?? "").trim();
   if (explicit) return explicit;
@@ -104,6 +131,24 @@ export async function discoverCompanies(
   const skipped: string[] = [];
 
   db.prepare("UPDATE campaign SET status='researching', updated_at=? WHERE id=?").run(now(), campaignId);
+
+  // The targeting text typed into the discover box used to shape the search queries and then
+  // vanish. The qualification gate in enrichCompany reads campaign.target_description, so an
+  // instruction that only lived in this function's arguments never reached the gate - which is
+  // how a campaign for "small local news sites" got as far as drafting an email to a tennis
+  // academy. Persist it, so it survives, reaches the gate, and is visible in the UI.
+  const extra = (opts.extra ?? "").trim();
+  if (extra) {
+    const existing = String(campaign.target_description ?? "").trim();
+    if (!existing) {
+      campaign.target_description = extra;
+      db.prepare("UPDATE campaign SET target_description=?, updated_at=? WHERE id=?").run(extra, now(), campaignId);
+    } else if (!existing.includes(extra)) {
+      const merged = `${existing}\n${extra}`;
+      campaign.target_description = merged;
+      db.prepare("UPDATE campaign SET target_description=?, updated_at=? WHERE id=?").run(merged, now(), campaignId);
+    }
+  }
 
   const target = targetOf(campaign, product);
   const progress = opts.onProgress ?? (() => {});
@@ -305,7 +350,7 @@ export async function prefetchCompanies(
 
 export interface EnrichResult {
   pages: number; claims: number; verified: number; rejected: string[];
-  recheck?: { actual_name: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string };
+  recheck?: { actual_name: string; target_kind: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string; rejected?: boolean };
 }
 
 export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: string): Promise<EnrichResult> {
@@ -386,8 +431,9 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
   const campaign = db.prepare("SELECT * FROM campaign WHERE id=?").get(cc.campaign_id) as any;
   const product = db.prepare("SELECT * FROM product WHERE id=?").get(campaign.product_id) as any;
   let recheck: EnrichResult["recheck"];
+  let rejectedByGate = false;
   try {
-    const rc = await llm.run<{ actual_name: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string }>({
+    const rc = await llm.run<{ actual_name: string; target_kind: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string }>({
       task: "company.judge",
       system: P.RECHECK_SYSTEM,
       prompt: P.recheckPrompt({
@@ -397,7 +443,7 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
       schema: P.RECHECK_SCHEMA,
       subject: { type: "campaign_company", id: campaignCompanyId },
     });
-    recheck = rc.value;
+    recheck = { ...rc.value };
     tx(db, () => {
       // Trust the page over the search result for the name.
       if (rc.value.actual_name && rc.value.actual_name.trim()) {
@@ -405,15 +451,24 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
       }
       db.prepare("UPDATE campaign_company SET relevance_score=?, relevance_reason=?, updated_at=? WHERE id=?")
         .run(rc.value.fit_score / 100, rc.value.reason, now(), campaignCompanyId);
-      if (!rc.value.matches_target) {
+      const decision = gateDecision({
+        matchesTarget: rc.value.matches_target, fitScore: rc.value.fit_score,
+        floor: Number(campaign.min_fit_score ?? 45),
+        targetKind: rc.value.target_kind, entityKind: rc.value.entity_kind,
+      });
+      rejectedByGate = decision.rejected;
+      if (decision.rejected) {
         db.prepare("UPDATE campaign_company SET status='rejected', selected=0, rejected_reason=?, updated_at=? WHERE id=?")
-          .run(`not the target kind - it is a ${rc.value.entity_kind}`, now(), campaignCompanyId);
+          .run(decision.reason ?? "rejected", now(), campaignCompanyId);
       }
     });
   } catch {
     // A failed recheck must not lose the enrichment we already did.
   }
 
+  // The caller must stop on EITHER rejection reason. Reporting only matches_target let a
+  // company that scraped past the boolean but failed the floor carry on to drafting.
+  if (recheck) recheck.rejected = rejectedByGate;
   return { pages: pages.length, claims: (r.value.claims ?? []).length, verified, rejected, recheck };
 }
 

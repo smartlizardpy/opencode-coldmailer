@@ -1,0 +1,12 @@
+-- Two fixes to the targeting gate, prompted by a real miss: a campaign looking for small
+-- local news sites drafted an email to a tennis academy.
+--
+-- 1. The targeting text typed into the discover box shaped the SEARCH QUERIES but was never
+--    persisted, so it never reached the qualification gate. The gate judged against the
+--    product's generic audience instead, where "sports-related" was close enough to pass.
+--    discoverCompanies now writes that text into campaign.target_description, which the gate
+--    already reads, so the instruction survives and is visible in the UI.
+--
+-- 2. matches_target was a single boolean the model could fudge for a topical near-miss.
+--    A numeric floor gives a second, independent reason to reject.
+ALTER TABLE campaign ADD COLUMN min_fit_score INTEGER NOT NULL DEFAULT 45;

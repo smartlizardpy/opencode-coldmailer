@@ -471,14 +471,27 @@ Judge ONLY from the page text you are given, never from the name you were told. 
 this is a shooting and hunting club, then it is a shooting and hunting club, whatever the search
 result called it.
 
-Set matches_target=false whenever the organisation is not the KIND of thing the target describes,
-even if its subject matter is related. Being about the right topic is not enough.`;
+Work in this order, and fill the fields in this order:
+1. target_kind - what KIND of organisation the target is asking for, in your own words, as a
+   category noun. Not the topic. "local news website", "dental practice", "letting agent".
+2. entity_kind - what kind this organisation actually is, from its own pages.
+3. matches_target - true ONLY if entity_kind is the same KIND of thing as target_kind.
+
+Sharing a subject is not being the same kind of thing. A tennis academy and a sports news site
+are both about sport; only one of them is a news site. A hospital and a medical equipment
+supplier are both about healthcare; only one of them treats patients. If you find yourself
+justifying a match by the topic they have in common rather than by what the organisation IS,
+the answer is false.
+
+fit_score is how well it fits the whole target once the kind matches. If matches_target is
+false, fit_score must be 0.`;
 
 export const RECHECK_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["actual_name", "entity_kind", "matches_target", "fit_score", "reason"],
+  required: ["actual_name", "target_kind", "entity_kind", "matches_target", "fit_score", "reason"],
   properties: {
     actual_name: { type: "string", description: "the organisation's real name, as the page gives it" },
+    target_kind: { type: "string", description: "the KIND of organisation the target asks for, as a category noun" },
     entity_kind: { type: "string", description: "what kind of organisation it actually is" },
     matches_target: { type: "boolean" },
     fit_score: { type: "number", minimum: 0, maximum: 100 },
@@ -500,5 +513,6 @@ Here is what the site actually says:
 
 ${body}
 
-Is this organisation the kind of thing the target describes?`;
+Name the kind the target asks for, name the kind this actually is, then decide. Being about the
+same subject is not enough - it has to BE the same kind of organisation.`;
 }

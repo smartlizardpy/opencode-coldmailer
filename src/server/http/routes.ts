@@ -112,6 +112,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
       // Never echo or store the password here - it goes to the Keychain only.
       const { password } = body.smtp;
       setSetting(db, "smtp", sanitizeSmtp({ ...prev, ...body.smtp }));
+      // Re-audit whenever the address changes. Without this the badge and the Deliverability
+      // page stay empty until the next restart - which is exactly the moment someone has just
+      // finished setting up their mailbox and would most like to be told about their SPF.
+      const nextFrom = (body.smtp.fromEmail ?? body.smtp.user ?? prev.fromEmail ?? prev.user ?? "") as string;
+      if (nextFrom && nextFrom !== (prev.fromEmail ?? prev.user)) warmAudit(nextFrom);
       if (password) {
         const storage = await setSecret(db, "smtp.password", password);
         app.log(`SMTP password stored: ${storageDescription(storage)}`);
@@ -141,6 +146,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
       lastError: smtpRes.ok ? null : smtpRes.error ?? null,
     }));
     if (smtpRes.ok && password) await setSecret(db, "smtp.password", password);
+    if (smtpRes.ok) warmAudit(cfg.fromEmail);
     // The raw error is kept alongside the explanation: when the guess is wrong, the original
     // text is the only thing that helps.
     return {
@@ -328,7 +334,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.post("/api/campaigns/:id/settings", ({ params, body }: RouteCtx) => {
-    for (const k of ["name", "goal", "target_description", "contacts_per_company", "allow_inferred_emails", "daily_send_limit", "min_gap_seconds", "max_gap_seconds"]) {
+    for (const k of ["name", "goal", "target_description", "contacts_per_company", "allow_inferred_emails", "daily_send_limit", "min_gap_seconds", "max_gap_seconds", "min_fit_score"]) {
       if (k in body) db.prepare(`UPDATE campaign SET ${k}=?, updated_at=? WHERE id=?`).run(body[k], now(), params.id);
     }
     return db.prepare("SELECT * FROM campaign WHERE id=?").get(params.id);
@@ -536,8 +542,11 @@ export function registerRoutes(r: Router, app: AppContext): void {
             progress("researching");
             const e = await enrichCompany({ db, llm: app.llm, fetcher: app.fetcher }, row.id);
             summary.enriched++;
-            if (e.recheck && !e.recheck.matches_target) {
-              summary.failures.push(`${co?.name}: not the target kind - it is a ${e.recheck.entity_kind}`);
+            if (e.recheck?.rejected) {
+              const why = !e.recheck.matches_target
+                ? `not the target kind - looking for ${e.recheck.target_kind || "the target kind"}, this is a ${e.recheck.entity_kind}`
+                : `fit ${Math.round(e.recheck.fit_score)} below the campaign floor`;
+              summary.failures.push(`${co?.name}: ${why}`);
               progress("rejected");
               continue;
             }
