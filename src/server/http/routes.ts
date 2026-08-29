@@ -6,7 +6,7 @@ import { ulid, now, tx } from "../db/index.ts";
 import { getSetting, setSetting, type SendingSettings } from "../db/settings.ts";
 import { probeModels } from "../opencode/models.ts";
 import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/secrets.ts";
-import { verifySmtp, sendMail, newMessageId, GMAIL_PRESET } from "../mail/smtp.ts";
+import { verifySmtp, sendMail, newMessageId, explainSmtpError, GMAIL_PRESET } from "../mail/smtp.ts";
 import { auditCached, scoreMessage, warmAudit } from "../mail/deliverability.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress, SUPPRESSION_REASONS } from "../queue/sendQueue.ts";
@@ -141,7 +141,12 @@ export function registerRoutes(r: Router, app: AppContext): void {
       lastError: smtpRes.ok ? null : smtpRes.error ?? null,
     }));
     if (smtpRes.ok && password) await setSecret(db, "smtp.password", password);
-    return { smtp: smtpRes, imap: imapRes };
+    // The raw error is kept alongside the explanation: when the guess is wrong, the original
+    // text is the only thing that helps.
+    return {
+      smtp: smtpRes.ok ? smtpRes : { ...smtpRes, ...explainSmtpError(smtpRes.error ?? "", cfg.host) },
+      imap: imapRes.ok ? imapRes : { ...imapRes, ...explainSmtpError(imapRes.error ?? "", s.imapHost ?? GMAIL_IMAP.host) },
+    };
   });
 
   r.post("/api/settings/forget-password", async () => { await deleteSecret(db, "smtp.password"); return { ok: true }; });

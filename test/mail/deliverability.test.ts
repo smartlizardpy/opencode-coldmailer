@@ -103,3 +103,46 @@ test("a DNS failure is reported as unknown, never as a missing record", async (t
   // A domain we simply could not reach must not be scored as broken.
   assert.equal(audit.score, 100);
 });
+
+/* Connection failures, in words the person setting this up can act on. */
+
+test("a rejected login says an app password is what is needed", async () => {
+  const { explainSmtpError } = await import("../../src/server/mail/smtp.ts");
+  // Gmail's own text - "Username and Password not accepted" - is accurate and useless: it
+  // does not say that the password you sign in with is never the right one here.
+  const d = explainSmtpError("Invalid login: 535-5.7.8 Username and Password not accepted", "smtp.gmail.com");
+  assert.match(d.message, /rejected the username or password/i);
+  assert.match(d.fix!, /app password/i);
+  assert.match(d.fix!, /2-Step/i);
+  assert.match(d.raw, /535/, "the server's own words are kept");
+});
+
+test("534 is recognised as specifically asking for an app password", async () => {
+  const { explainSmtpError } = await import("../../src/server/mail/smtp.ts");
+  const d = explainSmtpError("534-5.7.9 Application-specific password required", "smtp.gmail.com");
+  assert.match(d.message, /app password/i);
+  assert.match(d.fix!, /App passwords/);
+});
+
+test("a non-Gmail host does not get told to open Google Account settings", async () => {
+  const { explainSmtpError } = await import("../../src/server/mail/smtp.ts");
+  const d = explainSmtpError("535 authentication failed", "smtp.fastmail.com");
+  assert.doesNotMatch(d.fix ?? "", /Google|2-Step/);
+});
+
+test("connection-level failures name the actual cause", async () => {
+  const { explainSmtpError } = await import("../../src/server/mail/smtp.ts");
+  assert.match(explainSmtpError("getaddrinfo ENOTFOUND smtp.gmial.com", "smtp.gmial.com").message, /No server found/);
+  assert.match(explainSmtpError("getaddrinfo ENOTFOUND smtp.gmial.com", "smtp.gmial.com").message, /smtp\.gmial\.com/);
+  assert.match(explainSmtpError("connect ECONNREFUSED 1.2.3.4:465").fix!, /port/i);
+  assert.match(explainSmtpError("Connection timeout").fix!, /firewall|587/i);
+  assert.match(explainSmtpError("error:1408F10B:SSL routines:ssl3_get_record:wrong version number").message, /encryption/i);
+  assert.match(explainSmtpError("421 4.7.0 Try again later").message, /temporarily/i);
+});
+
+test("an unrecognised error is passed through rather than guessed at", async () => {
+  const { explainSmtpError } = await import("../../src/server/mail/smtp.ts");
+  const d = explainSmtpError("something nobody has ever seen before", "smtp.example.com");
+  assert.equal(d.message, "something nobody has ever seen before");
+  assert.equal(d.fix, undefined, "no guess is better than a wrong one dressed up as an explanation");
+});

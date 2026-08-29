@@ -1302,9 +1302,19 @@ async function renderSettings() {
         host: $("#smtpHost").value.trim(), port: +$("#smtpPort").value,
         secure: +$("#smtpPort").value === 465, imapHost: $("#imapHost").value.trim(),
       } });
-      $("#testResult").innerHTML =
-        `SMTP ${res.smtp.ok ? `<span class="tag ok">ok</span>` : `<span class="tag bad">${esc(res.smtp.error)}</span>`}
-         IMAP ${res.imap.ok ? `<span class="tag ok">ok</span>` : `<span class="tag warn">${esc(res.imap.error)}</span>`}`;
+      $("#testResult").innerHTML = `
+        <div class="row" style="gap:var(--s3)">
+          <span>SMTP ${res.smtp.ok ? `<span class="tag ok">ok</span>` : `<span class="tag bad">failed</span>`}</span>
+          <span>IMAP ${res.imap.ok ? `<span class="tag ok">ok</span>` : `<span class="tag warn">failed</span>`}</span>
+        </div>
+        ${[["Sending", res.smtp, "bad"], ["Replies", res.imap, "warn"]]
+          .filter(([, r]) => !r.ok)
+          .map(([what, r, tone]) => `<div class="flagbox" ${tone === "bad" ? 'data-sev="critical"' : ""} style="margin-top:var(--s3)">
+            ${icon("warning-triangle")} <b>${esc(what)}: ${esc(r.message ?? r.error ?? "failed")}</b>
+            ${r.fix ? `<div class="dcheck-fix" style="margin-top:var(--s2)">${icon("arrow-right")}${esc(r.fix)}</div>` : ""}
+            ${r.raw && r.raw !== r.message ? `<details style="margin-top:var(--s2)"><summary>what the server said</summary>
+              <code class="dcheck-found">${esc(r.raw)}</code></details>` : ""}
+          </div>`).join("")}`;
       if (res.smtp.ok) { toast("Mailbox connected"); loadHealth(); }
     } catch (e) { fail(e); $("#testResult").textContent = ""; }
     finally { b.disabled = false; }

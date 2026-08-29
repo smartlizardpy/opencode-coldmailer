@@ -17,7 +17,16 @@ export async function verifyImap(cfg: ImapConfig, password: string): Promise<{ o
   const c = new ImapFlow({ host: cfg.host, port: cfg.port, secure: cfg.secure,
     auth: { user: cfg.user, pass: password.replace(/\s+/g, "") }, logger: false });
   try { await c.connect(); await c.logout(); return { ok: true }; }
-  catch (e) { return { ok: false, error: (e as Error).message.slice(0, 300) }; }
+  catch (e) {
+    // imapflow's `message` for a rejected login is the bare "Command failed", which tells the
+    // user nothing at all. `response` carries the server's actual reply and
+    // `authenticationFailed` says which kind of failure it was; use whichever exists.
+    const err = e as Error & { code?: string; response?: string; authenticationFailed?: boolean };
+    const detail = err.response || err.message || "connection failed";
+    const prefix = err.authenticationFailed && !/\b5\d\d\b|AUTHENTICATIONFAILED/i.test(detail)
+      ? "Authentication failed: " : "";
+    return { ok: false, error: `${prefix}${detail}`.slice(0, 300) };
+  }
 }
 
 function idsFrom(value: unknown): string[] {
