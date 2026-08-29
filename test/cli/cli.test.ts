@@ -12,15 +12,19 @@ const run = promisify(execFile);
 const BIN = join(process.cwd(), "bin/coldcall.js");
 /**
  * Each of these spawns a real coldcall process, which opens a database and runs every
- * migration - about three seconds on an idle machine. `node --test` runs files in parallel
- * across every core, so under a full suite they contend with each other and with every other
- * spawned process, and 30 seconds turned out to be inside that range rather than safely
- * outside it: they passed alone and timed out together.
+ * migration - about three seconds on an idle machine, and the only way to test the shim people
+ * actually run rather than the module behind it.
  *
- * The timeout is only here to stop a hang from wedging the suite forever, so it is set far
- * enough out that scheduling noise cannot reach it.
+ * `node --test` runs files in parallel across every core, so these contend with each other,
+ * with every other test file, and with whatever else the developer has open. Measured on a
+ * four-core laptop at load average 30 - an ordinary desktop with a browser running - the same
+ * three-second command took over 150. Thirty seconds was inside that range, and so was 120.
+ *
+ * This timeout exists only to stop a hang wedging the suite forever, and a hang is not
+ * something anyone needs caught within the minute. Set it well past anything scheduling can
+ * produce, so a red test always means a real failure.
  */
-const CLI_TIMEOUT_MS = 120_000;
+const CLI_TIMEOUT_MS = 300_000;
 
 const cli = async (args: string[], home: string) =>
   (await run(process.execPath, [BIN, ...args], { env: { ...process.env, COLDCALL_HOME: home }, timeout: CLI_TIMEOUT_MS })).stdout;

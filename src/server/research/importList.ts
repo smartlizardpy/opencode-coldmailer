@@ -35,6 +35,12 @@ const URL_LIKE = /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i;
 const DOMAIN_HEADERS = ["website", "domain", "url", "site", "web", "link", "website_url", "homepage"];
 const NAME_HEADERS = ["name", "company", "company name", "business", "title", "organisation", "organization"];
 
+/** The comparable part of a URL or domain: no scheme, no www, no path, lower-case. */
+function bareDomain(value: string): string {
+  return stripPunctuation(value).toLowerCase()
+    .replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+}
+
 /** Trailing commas, semicolons and wrapping brackets are punctuation, not part of a domain. */
 function stripPunctuation(token: string): string {
   return token.replace(/^[<([{"']+/, "").replace(/[>)\]}"'.,;:]+$/, "");
@@ -53,9 +59,12 @@ export function parseCompanyList(text: string, limit = 500): ImportResult {
 
   // "a.com, b.com" parses as one row of two fields, so the table branch below would call the
   // second domain the first one's NAME and quietly import half the list under a wrong name.
-  // When every cell is a domain there are no names here, only companies.
+  // When every cell is a DIFFERENT domain there are no names here, only companies - the
+  // distinctness matters, because "Sporankara.org,sporankara.org" is one company whose name
+  // happens to look like its address, not two companies.
   const cells = table.flat().map((c) => stripPunctuation(c.trim())).filter(Boolean);
-  if (cells.length > 1 && cells.every((c) => URL_LIKE.test(c))) {
+  const distinct = new Set(cells.map((c) => bareDomain(c)));
+  if (cells.length > 1 && distinct.size === cells.length && cells.every((c) => URL_LIKE.test(c))) {
     const rows = cells.slice(0, limit).map((website) => ({ website }));
     return { rows, skipped: [], format: cells.length === table.length ? "lines" : "csv" };
   }
@@ -80,8 +89,12 @@ export function parseCompanyList(text: string, limit = 500): ImportResult {
         if (!website) continue;
         if (!URL_LIKE.test(website)) { skipped.push(`${website} - not a domain`); continue; }
         const name = nameIdx >= 0 ? (r[nameIdx] ?? "").trim() : "";
-        // A cell that is itself a domain is another company, not this one's name.
-        const usable = name && name !== website && !URL_LIKE.test(stripPunctuation(name));
+        // A cell holding a DIFFERENT domain is another company, not this one's name. One
+        // holding the same domain is the company's name: plenty of outlets are called
+        // "Sporankara.org", and dropping that leaves the row with no name at all.
+        const isOtherDomain = !!name && URL_LIKE.test(stripPunctuation(name))
+          && bareDomain(name) !== bareDomain(website);
+        const usable = name && name !== website && !isOtherDomain;
         rows.push({ website, name: usable ? name : undefined });
         if (rows.length >= limit) break;
       }

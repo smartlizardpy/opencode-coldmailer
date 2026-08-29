@@ -128,3 +128,33 @@ test("a line with no domain in it is skipped with a reason, not silently", () =>
   assert.equal(r.skipped.length, 1);
   assert.match(r.skipped[0], /not a domain/);
 });
+
+test("a company whose name IS its domain keeps its name", () => {
+  // Plenty of outlets are literally called "Sporankara.org". Treating every domain-shaped cell
+  // as "not a name" stripped the name off every one of them - including on a round-trip of the
+  // product's own CSV export, which is the one import that must not lose anything.
+  assert.deepEqual(named("Sporankara.org,sporankara.org"), ["Sporankara.org|sporankara.org"]);
+  assert.deepEqual(named("name,website\nSporankara.org,sporankara.org"), ["sporankara.org|Sporankara.org"]);
+});
+
+test("a name cell holding somebody else's domain is still not a name", () => {
+  // This is the case the rule exists for: two domains on one line are two companies.
+  assert.deepEqual(websites("a.com, b.com"), ["a.com", "b.com"]);
+  assert.deepEqual(parseCompanyList("a.com, b.com").rows.every((r) => r.name === undefined), true);
+});
+
+test("www and a scheme do not make it a different domain", () => {
+  assert.deepEqual(named("name,website\nwww.Sporankara.org,https://sporankara.org"),
+    ["https://sporankara.org|www.Sporankara.org"]);
+});
+
+test("the product's own export re-imports without losing a name", () => {
+  // The export is header + one row per company, with a UTF-8 BOM for Excel.
+  const csv = '﻿"name","domain","website_url","city"\r\n'
+    + '"Sporankara.org","sporankara.org","https://www.sporankara.org","Ankara"\r\n'
+    + '"Günaydın Ankara","gunaydinankara.com","https://gunaydinankara.com","Ankara"';
+  const r = parseCompanyList(csv);
+  assert.equal(r.rows.length, 2, "the header must not be imported as a company");
+  assert.equal(r.rows.every((x) => !!x.name), true, "every row keeps its name");
+  assert.deepEqual(r.rows.map((x) => x.name), ["Sporankara.org", "Günaydın Ankara"]);
+});

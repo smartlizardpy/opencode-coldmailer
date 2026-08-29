@@ -401,7 +401,13 @@ Who you are writing to:
 
 VERIFIED facts about them. You may only assert things from this list:
 ${facts}
-${args.instruction ? `\nExtra instruction from the sender: ${args.instruction}` : ""}
+${args.instruction ? `
+Extra instruction from the sender: ${args.instruction}
+
+Follow it, and keep citing at least one of the verified facts above unless the instruction
+specifically asks you to drop it. "Make it shorter" means cut the pitch, not the one specific
+thing that proves this email was written for them - an email that loses that is a mail-merge,
+which is the only thing this is trying not to be.` : ""}
 
 Write ${args.instruction ? "one revised variant" : "two variants"}.`;
 }
