@@ -455,3 +455,15 @@ details[open] summary::before{transform:rotate(90deg)}
 /* Row actions sit on one line and stay right-aligned as buttons appear and disappear -
    a rejected row gains an "Include anyway" button and must not reflow the column. */
 .rowacts { display: flex; gap: var(--s2); align-items: center; justify-content: flex-end; white-space: nowrap; }
+
+/* Targeting dry-run verdict. The two kinds sit side by side because the whole point is the
+   comparison — "looking for a news site, this is a tennis academy" is the finding. */
+.verdict { margin-top: var(--s3); padding: var(--s4); border-radius: var(--r);
+  border: 1px solid var(--border); background: var(--surface); }
+.verdict.pass { border-color: var(--ok); }
+.verdict.fail { border-color: var(--bad); }
+.verdict-head { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin-bottom: var(--s3); }
+.verdict-kinds { display: grid; grid-template-columns: auto 1fr; gap: var(--s1) var(--s4);
+  margin: 0; font-size: 13px; }
+.verdict-kinds dt { color: var(--muted); }
+.verdict-kinds dd { margin: 0; font-weight: 500; }

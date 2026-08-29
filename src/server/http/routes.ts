@@ -10,7 +10,7 @@ import { verifySmtp, sendMail, newMessageId, explainSmtpError, GMAIL_PRESET } fr
 import { auditCached, scoreMessage, warmAudit } from "../mail/deliverability.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
 import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress, unapproveDraft, SUPPRESSION_REASONS } from "../queue/sendQueue.ts";
-import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
+import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf, testTarget, withArticle } from "../research/pipeline.ts";
 import { parseCompanyList } from "../research/importList.ts";
 import { composeDraft, saveHumanEdit, renderedBody, productForDraft } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
@@ -407,6 +407,12 @@ export function registerRoutes(r: Router, app: AppContext): void {
     return { approved, skipped };
   });
 
+  /** Dry-run the targeting gate against one site. Commits nothing. */
+  r.post("/api/campaigns/:id/test-target", async ({ params, body }: RouteCtx) => {
+    if (!String(body.website ?? "").trim()) throw bad("enter a domain to test");
+    return testTarget({ db, llm: app.llm, fetcher: app.fetcher }, params.id, String(body.website));
+  });
+
   r.post("/api/companies/:ccId/select", ({ params, body }: RouteCtx) => {
     db.prepare("UPDATE campaign_company SET selected=?, updated_at=? WHERE id=?").run(body.selected ? 1 : 0, now(), params.ccId);
     return { ok: true };
@@ -564,7 +570,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
             summary.enriched++;
             if (e.recheck?.rejected) {
               const why = !e.recheck.matches_target
-                ? `not the target kind - looking for ${e.recheck.target_kind || "the target kind"}, this is a ${e.recheck.entity_kind}`
+                ? `not the target kind - looking for ${e.recheck.target_kind || "the target kind"}, this is ${withArticle(e.recheck.entity_kind ?? "")}`
                 : `fit ${Math.round(e.recheck.fit_score)} below the campaign floor`;
               summary.failures.push(`${co?.name}: ${why}`);
               progress("rejected");

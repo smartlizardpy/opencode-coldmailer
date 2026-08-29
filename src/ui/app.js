@@ -536,6 +536,21 @@ async function renderCampaigns() {
         <input id="extraTargeting" aria-label="Extra targeting instructions" placeholder="Optional: narrow it, e.g. 'within 20 miles of Durham'" style="flex:1;min-width:220px">
         <button class="btn" id="btnDiscover">${icon("search")} Search the web</button>
       </div>
+      <p class="card-note">This text is saved as what the campaign is looking for, and the
+        targeting gate judges every result against it — so be specific about the
+        <em>kind</em> of organisation, not just the subject.</p>
+      <details>
+        <summary>Check one site before running the whole campaign</summary>
+        <p class="card-note">Runs the targeting gate against a single site and shows its
+          reasoning. Commits nothing, and the page is cached, so running the campaign later
+          does not fetch it twice.</p>
+        <div class="row">
+          <input id="testDomain" aria-label="Domain to test against the targeting gate"
+            placeholder="pta.com.tr" style="flex:1;min-width:200px">
+          <button class="btn ghost sm" id="btnTestTarget">${icon("shield-search")} Check it</button>
+        </div>
+        <div id="testResult"></div>
+      </details>
       <details>
         <summary>Or paste a list</summary>
         <textarea id="manualList" rows="5" aria-label="Companies to add"
@@ -618,6 +633,31 @@ async function renderCampaigns() {
   $("#btnDiscover").onclick = async () => {
     try { await api(`/api/campaigns/${camp.id}/discover`, { extra: $("#extraTargeting").value }); toast("Searching the web…"); }
     catch (e) { fail(e); }
+  };
+  $("#btnTestTarget").onclick = async () => {
+    const website = $("#testDomain").value.trim();
+    if (!website) return toast("Enter a domain first", true);
+    const btn = $("#btnTestTarget"), out = $("#testResult");
+    btn.disabled = true;
+    out.innerHTML = `<div class="card-note">Fetching and judging ${esc(website)}…</div>`;
+    try {
+      const r = await api(`/api/campaigns/${camp.id}/test-target`, { website });
+      if (r.error) { out.innerHTML = `<div class="flagbox">Could not read that site: ${esc(r.error)}</div>`; return; }
+      out.innerHTML = `
+        <div class="verdict ${r.wouldPass ? "pass" : "fail"}">
+          <div class="verdict-head">
+            <span class="tag ${r.wouldPass ? "ok" : "bad"}">${r.wouldPass ? "would be included" : "would be rejected"}</span>
+            ${r.fitScore != null ? `<span class="tag">fit ${Math.round(r.fitScore)}</span>` : ""}
+            <span class="mono">${esc(r.actualName || website)}</span>
+          </div>
+          <dl class="verdict-kinds">
+            <dt>Looking for</dt><dd>${esc(r.targetKind || "—")}</dd>
+            <dt>This site is</dt><dd>${esc(r.entityKind || "—")}</dd>
+          </dl>
+          ${r.reason ? `<p class="card-note">${esc(r.reason)}</p>` : ""}
+          ${r.rejectedReason ? `<p class="card-note" style="color:var(--bad)">${esc(r.rejectedReason)}</p>` : ""}
+        </div>`;
+    } catch (e) { fail(e); out.innerHTML = ""; } finally { btn.disabled = false; }
   };
   $("#btnManual").onclick = async () => {
     try {

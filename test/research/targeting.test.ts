@@ -148,3 +148,15 @@ test("a retry clears the override, so it does not silently outlive the rejection
   db.prepare("UPDATE campaign_company SET status='discovered', rejected_reason=NULL, gate_override=0 WHERE id=?").run(cc);
   assert.equal((db.prepare("SELECT gate_override FROM campaign_company WHERE id=?").get(cc) as any).gate_override, 0);
 });
+
+test("the rejection reason gets its article right — 'an architectural firm', not 'a'", () => {
+  const d = gateDecision({ matchesTarget: false, fitScore: 0, floor: 45,
+    targetKind: "news site", entityKind: "architectural design firm" });
+  assert.match(d.reason!, /this is an architectural design firm/);
+});
+
+test("a kind that already carries its own article is not given a second one", () => {
+  assert.match(
+    gateDecision({ matchesTarget: false, fitScore: 0, floor: 45, entityKind: "a charity" }).reason!,
+    /this is a charity/);
+});

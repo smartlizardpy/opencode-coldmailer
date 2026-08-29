@@ -44,11 +44,19 @@ export interface GateInput {
   matchesTarget: boolean; fitScore: number; floor: number;
   targetKind?: string; entityKind?: string;
 }
+/** "a architectural firm" in a rejection reason reads as a bug in everything around it. */
+export function withArticle(noun: string): string {
+  const n = noun.trim();
+  if (!n) return "a different kind of organisation";
+  if (/^(a|an|the)\s/i.test(n)) return n;
+  return `${/^[aeiou]/i.test(n) ? "an" : "a"} ${n}`;
+}
+
 export function gateDecision(g: GateInput): { rejected: boolean; reason?: string } {
   if (!g.matchesTarget) {
     return {
       rejected: true,
-      reason: `not the target kind - looking for ${g.targetKind?.trim() || "the target kind"}, this is a ${g.entityKind?.trim() || "different kind of organisation"}`,
+      reason: `not the target kind - looking for ${g.targetKind?.trim() || "the target kind"}, this is ${withArticle(g.entityKind ?? "")}`,
     };
   }
   const fit = Number.isFinite(g.fitScore) ? g.fitScore : 0;
@@ -664,4 +672,88 @@ export async function judgeCompany(deps: PipelineDeps, campaignCompanyId: string
   db.prepare("UPDATE campaign_company SET relevance_score=?, relevance_reason=?, matched_signal=?, updated_at=? WHERE id=?")
     .run(r.value.fit_score / 100, r.value.reason, r.value.matched_signal, now(), campaignCompanyId);
   return { score: r.value.fit_score, reason: r.value.reason };
+}
+
+/* --------------------------------------------------------------- dry run */
+
+export interface TargetTest {
+  url: string;
+  fetched: boolean;
+  pages: number;
+  target: string;
+  targetKind?: string;
+  entityKind?: string;
+  actualName?: string;
+  fitScore?: number;
+  reason?: string;
+  wouldPass: boolean;
+  rejectedReason?: string;
+  error?: string;
+}
+
+/**
+ * Run the qualification gate against one site without committing anything.
+ *
+ * The point is trust. After the gate wrongly passed a tennis academy for a news-site campaign,
+ * the honest answer to "is my targeting right?" was to run a whole campaign and read the
+ * results. This answers it in one fetch, and shows the gate's actual reasoning - the kind it
+ * is looking for, the kind it found - so a vague target can be fixed before it wastes a run.
+ *
+ * Writes nothing to campaign_company. The page cache is shared with the real crawl, so
+ * testing a site and then running it for real does not fetch twice.
+ */
+export async function testTarget(deps: PipelineDeps, campaignId: string, website: string): Promise<TargetTest> {
+  const { db, llm, fetcher } = deps;
+  const { campaign, product } = getCampaign(db, campaignId);
+  const target = targetOf(campaign, product);
+
+  let url = website.trim();
+  if (!url) throw new Error("enter a domain to test");
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  url = normalizeUrl(url);
+
+  const base: TargetTest = { url, fetched: false, pages: 0, target, wouldPass: false };
+
+  // Bounded and deliberately small: a dry run should cost one or two fetches, not a full crawl.
+  const pages: Array<{ url: string; title: string; text: string }> = [];
+  const cached = getCachedPage(db, url);
+  if (cached) {
+    pages.push({ url: cached.url, title: cached.title, text: cached.text });
+  } else {
+    const res = await fetcher.fetch(url);
+    if (!res.ok || !res.html) {
+      return { ...base, error: res.error ?? `the site returned HTTP ${res.status}` };
+    }
+    const ex = extractPage(res.html, res.finalUrl);
+    storePage(db, res, ex.text, ex.title, undefined, pickContactPages(ex.links, res.finalUrl, 12), ex.emails, ex.hasContactForm);
+    pages.push({ url: res.finalUrl, title: ex.title, text: ex.text });
+  }
+  base.fetched = true;
+  base.pages = pages.length;
+
+  const rc = await llm.run<{ actual_name: string; target_kind: string; entity_kind: string; matches_target: boolean; fit_score: number; reason: string }>({
+    task: "company.judge",
+    system: P.RECHECK_SYSTEM,
+    prompt: P.recheckPrompt({ target, claimedName: domainOf(url), domain: domainOf(url), pages }),
+    schema: P.RECHECK_SCHEMA,
+    priority: "interactive",
+    subject: { type: "campaign", id: campaignId },
+  });
+
+  const decision = gateDecision({
+    matchesTarget: rc.value.matches_target, fitScore: rc.value.fit_score,
+    floor: Number(campaign.min_fit_score ?? 45),
+    targetKind: rc.value.target_kind, entityKind: rc.value.entity_kind,
+  });
+
+  return {
+    ...base,
+    targetKind: rc.value.target_kind,
+    entityKind: rc.value.entity_kind,
+    actualName: rc.value.actual_name,
+    fitScore: rc.value.fit_score,
+    reason: rc.value.reason,
+    wouldPass: !decision.rejected,
+    rejectedReason: decision.reason,
+  };
 }
