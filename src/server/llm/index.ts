@@ -24,7 +24,8 @@ import { ulid, now, type Db } from "../db/index.ts";
 
 export type LlmTask =
   | "interview.next_question" | "interview.extract_product"
-  | "search.queries" | "company.judge" | "company.enrich" | "contact.find" | "contact.extract"
+  | "search.queries" | "discover.search" | "company.judge" | "company.enrich"
+  | "contact.extract"
   | "email.draft" | "email.revise" | "reply.classify" | "reply.draft";
 
 /** Which lane and tool policy each task runs under. Central so no caller can get it wrong. */
@@ -33,8 +34,10 @@ const TASK_CONFIG: Record<LlmTask, { slot: Slot; policy: ToolPolicy; kind: "extr
   "interview.extract_product":{ slot: "writing",  policy: "none",     kind: "extract" },
   "search.queries":           { slot: "writing",  policy: "none",     kind: "extract" },
   "company.judge":            { slot: "writing",  policy: "none",     kind: "extract" },
+  // Discovery searches the web for companies; enrichment reads the site of one we already
+  // have. Same lane and policy, different stage - and the Activity screen has to say which.
+  "discover.search":          { slot: "research", policy: "research", kind: "extract" },
   "company.enrich":           { slot: "research", policy: "research", kind: "extract" },
-  "contact.find":             { slot: "research", policy: "research", kind: "extract" },
   "contact.extract":          { slot: "writing",  policy: "none",     kind: "extract" },
   "email.draft":              { slot: "writing",  policy: "none",     kind: "write" },
   "email.revise":             { slot: "writing",  policy: "none",     kind: "write" },

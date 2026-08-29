@@ -333,7 +333,9 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
   let r;
   try {
     r = await llm.run<{ summary: string; industry?: string; city?: string; claims: Array<{ claim: string; source_url: string; quote: string }> }>({
-      task: "contact.extract",
+      // Summarising a company and extracting claims about it is enrichment. It was logged
+      // as "contact.extract", which is a different stage entirely.
+      task: "company.enrich",
       system: P.ENRICH_SYSTEM,
       prompt: P.enrichPrompt({ name: company.name, domain: company.domain }, pages),
       schema: P.ENRICH_SCHEMA,

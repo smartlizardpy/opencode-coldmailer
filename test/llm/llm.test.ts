@@ -160,7 +160,7 @@ test("a tool call in an EARLIER assistant message is still caught", async () => 
   fake.reset([{ text: "all done, nothing to see", tools: [{ tool: "write", input: { path: "/etc/passwd" } }] }]);
   const { service } = svc();
   await assert.rejects(
-    () => service.run({ task: "contact.find", system: "s", prompt: "p" }),
+    () => service.run({ task: "discover.search", system: "s", prompt: "p" }),
     (e: LlmError) => e.code === "TOOL_POLICY_VIOLATION",
   );
 });
@@ -196,7 +196,7 @@ test("writing tasks send a tools map that denies websearch", async () => {
 test("research tasks send the research agent and allow only websearch + webfetch", async () => {
   fake.reset([{ text: '{"ok":true,"city":"Durham"}' }]);
   const { service } = svc();
-  await service.run({ task: "contact.find", system: "s", prompt: "p", schema: SCHEMA });
+  await service.run({ task: "discover.search", system: "s", prompt: "p", schema: SCHEMA });
   const b = fake.received[0].body;
   assert.equal(b.agent, "coldcall-research");
   assert.equal(b.tools.websearch, true);
