@@ -53,7 +53,7 @@ A sidebar app shell, not a settings page with a send button.
 |---|---|
 | **Dashboard** | What needs attention. A funnel showing where companies drop out *and why*, sends and replies over 14 days, a setup checklist |
 | **Campaigns** | Target, discovery, and the company table with fit scores, verified-fact counts and per-company evidence |
-| **Review** | A keyboard-driven queue — `j`/`k` to move, `a` to approve, `e` edit, `r` rewrite, `s` skip. Every claim shows its quote and source |
+| **Review** | A keyboard-driven queue — `j`/`k` to move, `a` to approve, `u` to take that back, `e` edit, `r` rewrite, `s` skip. Every claim shows its quote and source |
 | **Outbox** | Daily cap, the send log, and the follow-up schedule |
 | **Replies** | Matched to their thread, classified, with a drafted response you can copy. Bounces and out-of-office replies are kept separate from people |
 | **Deliverability** | Whether your mail will be accepted at all: SPF, DKIM, DMARC and MX on your sending domain, each with what to do about it |
@@ -146,6 +146,12 @@ a draft is written and shown at the top of review:
 Three of these block a bulk approve; the rest are advisory. They are never auto-rejected — a flag
 means "read this one first", not "this is wrong".
 
+The rules know which email in the sequence they are reading. A first touch must cite something
+specific and must ask for something. A follow-up need not re-cite — repeating the same quote in
+every email is itself what makes a sequence read like a mail-merge — and the closing email, whose
+whole job is to say "I'll stop here" without asking again, is exempt from both. Applying first-touch
+rules to a sign-off flagged every single one of them, which is how a person learns to ignore flags.
+
 ## The one guarantee worth knowing
 
 **An email cannot contain a fact about someone's business that we did not fetch and verify
@@ -160,7 +166,8 @@ You can see this in the UI: every draft has a **Sources** button showing the quo
 
 ## What it will not do
 
-- Send anything you have not approved.
+- Send anything you have not approved. `u` puts an approval back in the queue, right up until the
+  moment a send is attempted — after that it says so rather than pretending mail can be recalled.
 - Send to anyone on the never-contact list — checked at the moment of sending, not at approval.
 - Exceed the daily cap. That's counted from what actually left in the last 24 hours, so
   restarting the app cannot get round it.
@@ -198,8 +205,9 @@ npm run verify:sandbox
 | `coldcall where` | Print where your data lives |
 | `coldcall --help` | The list above |
 
-Companies can be pasted as a bare list, as `domain Name` lines, or imported from a CSV — it works
-out which. Companies, contacts, drafts and the send log all export back out as CSV, and the export
+Companies can be pasted however you happen to have them — `domain`, `domain Name`, `Name domain`,
+`Name - domain`, a bulleted list, a numbered one, or a CSV — it works out which, and says which
+lines it could not read rather than rejecting the paste. Companies, contacts, drafts and the send log all export back out as CSV, and the export
 re-imports cleanly.
 
 `coldcall doctor` on a working install:
