@@ -14,7 +14,7 @@ import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, pre
 import { parseCompanyList } from "../research/importList.ts";
 import { composeDraft, saveHumanEdit, renderedBody, productForDraft } from "../research/compose.ts";
 import * as P from "../llm/prompts.ts";
-import { dashboardStats, toCsv, EXPORTS } from "../stats.ts";
+import { dashboardStats, localDay, toCsv, EXPORTS } from "../stats.ts";
 import { integrityReport, repairOrphans } from "../db/migrate.ts";
 import { DEFAULT_FOLLOWUPS, dueFollowUps, listSteps, seedDefaultSteps, setSteps, upcomingFollowUps } from "../queue/sequences.ts";
 
@@ -717,7 +717,8 @@ export function registerRoutes(r: Router, app: AppContext): void {
     if (!(kind in EXPORTS)) throw bad("unknown export");
     const rows = EXPORTS[kind](db, params.id) as Array<Record<string, unknown>>;
     const csv = toCsv(rows);
-    const stamp = new Date().toISOString().slice(0, 10);
+    // Local, not UTC: an export made at 00:30 in BST was named with yesterday's date.
+    const stamp = localDay();
     res.writeHead(200, {
       "content-type": "text/csv; charset=utf-8",
       "content-disposition": `attachment; filename="coldcall-${kind}-${stamp}.csv"`,

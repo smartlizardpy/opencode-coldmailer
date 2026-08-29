@@ -23,6 +23,16 @@ import { auditIssueCount } from "./mail/deliverability.ts";
  */
 export const MIN_SENDS_FOR_RATE = 20;
 
+/**
+ * A date as the user's own calendar shows it.
+ *
+ * toISOString() converts to UTC first, so local midnight becomes the previous day for anyone
+ * east of UTC - in BST every dashboard bar was labelled wrong, and an export made at 00:30 was
+ * stamped with yesterday. Anything a person reads as a date has to be built from local parts.
+ */
+export const localDay = (d: Date = new Date()): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 export interface Funnel {
   discovered: number; researched: number; contacted: number;   // companies
   drafted: number; approved: number; sent: number; replied: number;   // emails
@@ -79,11 +89,6 @@ export function dashboardStats(db: Db, campaignId?: string): DashboardStats {
     // People, not machines. A bounce in the "replied" number would make the funnel lie.
     replied: one(db, `SELECT COUNT(*) c FROM reply WHERE kind='reply' ${campaignId ? "AND campaign_id=?" : ""}`, ...arg),
   };
-
-  // Buckets are LOCAL days. toISOString() would convert local midnight to UTC and label the
-  // bucket with the previous day for anyone east of UTC - in BST every bar would be wrong.
-  const localDay = (d: Date): string =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   const sendsByDay: Array<{ day: string; sent: number; replies: number }> = [];
   for (let i = 13; i >= 0; i--) {

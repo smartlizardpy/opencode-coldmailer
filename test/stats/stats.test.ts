@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { openDb, ulid, now } from "../../src/server/db/index.ts";
 import { migrate } from "../../src/server/db/migrate.ts";
 import { seedDefaults } from "../../src/server/db/settings.ts";
-import { dashboardStats, toCsv, EXPORTS } from "../../src/server/stats.ts";
+import { dashboardStats, localDay, toCsv, EXPORTS } from "../../src/server/stats.ts";
 
 function world() {
   const db = openDb(":memory:"); migrate(db); seedDefaults(db);
@@ -195,4 +195,22 @@ test("with nothing sent there is no rate at all, meaningful or otherwise", () =>
   const s = dashboardStats(world().db);
   assert.equal(s.replyRate, null);
   assert.equal(s.replyRateIsMeaningful, false);
+});
+
+test("a date a person reads is built from local parts, never from UTC", () => {
+  // toISOString() converts to UTC first, so for anyone east of UTC local midnight becomes the
+  // previous day. That mislabelled every dashboard bar in BST once, and it was still stamping
+  // CSV exports made after local midnight with yesterday's date.
+  const justAfterMidnight = new Date();
+  justAfterMidnight.setHours(0, 30, 0, 0);
+  const expected = `${justAfterMidnight.getFullYear()}-${
+    String(justAfterMidnight.getMonth() + 1).padStart(2, "0")}-${
+    String(justAfterMidnight.getDate()).padStart(2, "0")}`;
+
+  assert.equal(localDay(justAfterMidnight), expected);
+  assert.match(localDay(), /^\d{4}-\d{2}-\d{2}$/);
+
+  // Months and days are zero-padded, so the strings sort chronologically.
+  assert.equal(localDay(new Date(2026, 0, 5, 12, 0)), "2026-01-05");
+  assert.equal(localDay(new Date(2026, 11, 31, 23, 59)), "2026-12-31");
 });
