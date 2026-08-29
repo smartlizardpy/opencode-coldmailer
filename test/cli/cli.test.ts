@@ -10,8 +10,20 @@ import { meetsMinimum } from "../../src/server/main.ts";
 
 const run = promisify(execFile);
 const BIN = join(process.cwd(), "bin/coldcall.js");
+/**
+ * Each of these spawns a real coldcall process, which opens a database and runs every
+ * migration - about three seconds on an idle machine. `node --test` runs files in parallel
+ * across every core, so under a full suite they contend with each other and with every other
+ * spawned process, and 30 seconds turned out to be inside that range rather than safely
+ * outside it: they passed alone and timed out together.
+ *
+ * The timeout is only here to stop a hang from wedging the suite forever, so it is set far
+ * enough out that scheduling noise cannot reach it.
+ */
+const CLI_TIMEOUT_MS = 120_000;
+
 const cli = async (args: string[], home: string) =>
-  (await run(process.execPath, [BIN, ...args], { env: { ...process.env, COLDCALL_HOME: home }, timeout: 30_000 })).stdout;
+  (await run(process.execPath, [BIN, ...args], { env: { ...process.env, COLDCALL_HOME: home }, timeout: CLI_TIMEOUT_MS })).stdout;
 
 test("version comparison is numeric, not lexical", () => {
   assert.equal(meetsMinimum("25.9.0", "22.13.0"), true);
