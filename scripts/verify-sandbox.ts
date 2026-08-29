@@ -42,7 +42,22 @@ try {
   const freeModels = models.filter((m) => m.providerID === "opencode");
   console.log(`  -> ${freeModels.length} free opencode/* models\n`);
 
-  async function ask(agent: string, model: ModelRef, policy: "none" | "research", prompt: string, timeoutMs = 120_000) {
+  /**
+   * Generous on purpose.
+   *
+   * A free model on a busy machine can take minutes to answer, and when it does not answer in
+   * time this script prints a red FAIL on a security check. That is the worst possible place
+   * for a false alarm: someone reads "research agent must NOT be able to run bash - FAILED"
+   * and concludes their sandbox is broken, when nothing was tested at all. Seen for real at
+   * load average 23, and passing on the retry with nothing changed.
+   *
+   * A timeout here means "no answer", never "the sandbox leaked" - the checks below only ever
+   * pass on a positive observation, so a slow model can make this script inconclusive but it
+   * cannot make it wrongly green.
+   */
+  const ASK_TIMEOUT_MS = 300_000;
+
+  async function ask(agent: string, model: ModelRef, policy: "none" | "research", prompt: string, timeoutMs = ASK_TIMEOUT_MS) {
     const s = await c.createSession(`coldcall-verify-${Date.now()}`);
     try {
       // promptAndCollect, not prompt: tool calls live in EARLIER assistant messages.
@@ -103,7 +118,7 @@ try {
         parts: [{ type: "text", text:
           'Return exactly one JSON object inside a single ```json fenced block, with no text ' +
           'before or after it. The object must have ok=true and city="Durham".' }],
-      }, { timeoutMs: 90_000 });
+      }, { timeoutMs: ASK_TIMEOUT_MS });
       const m = /```(?:json)?\s*([\s\S]*?)```/.exec(r.text);
       try {
         const parsed = JSON.parse((m ? m[1] : r.text).trim());
@@ -129,7 +144,7 @@ try {
           type: "object", additionalProperties: false, required: ["ok"],
           properties: { ok: { type: "boolean" } } }, retryCount: 1 },
         parts: [{ type: "text", text: "Set ok to true." }],
-      }, { timeoutMs: 90_000 });
+      }, { timeoutMs: ASK_TIMEOUT_MS });
       try {
         JSON.parse(r6.text.trim());
         console.log("  \x1b[33mNOTE\x1b[0m json_schema DID work - reconsider using it as primary");
