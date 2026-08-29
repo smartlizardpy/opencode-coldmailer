@@ -42,6 +42,8 @@ only if you don't already have ≥ 22.13.0 (the first version where `node:sqlite
 7. **Follow up.** Two steps by default, at 4 and 7 days. Anyone who replies leaves the sequence
    immediately.
 8. **Replies.** IMAP matches replies to the thread and drafts a response you can edit or ignore.
+   A bounce is not a reply and an out-of-office is not a reply; both are sorted out and only a
+   person answering stops the sequence.
 
 ## The screens
 
@@ -53,7 +55,8 @@ A sidebar app shell, not a settings page with a send button.
 | **Campaigns** | Target, discovery, and the company table with fit scores, verified-fact counts and per-company evidence |
 | **Review** | A keyboard-driven queue — `j`/`k` to move, `a` to approve, `e` edit, `r` rewrite, `s` skip. Every claim shows its quote and source |
 | **Outbox** | Daily cap, the send log, and the follow-up schedule |
-| **Replies** | Matched to their thread, classified, with a drafted response you can copy |
+| **Replies** | Matched to their thread, classified, with a drafted response you can copy. Bounces and out-of-office replies are kept separate from people |
+| **Deliverability** | Whether your mail will be accepted at all: SPF, DKIM, DMARC and MX on your sending domain, each with what to do about it |
 | **Product** | The interview and the editable brief |
 | **Settings** | Models, mailbox, limits, never-contact list |
 | **Activity** | Every model call, including what a failed one returned |
@@ -87,6 +90,49 @@ those was actually true.
 Every contact carries the page it came from and one of four tiers: `published`, `generic`
 (info@ / hello@), `inferred` (a pattern guess, off by default) or `manual`.
 
+## Deliverability
+
+Cold email fails at the mailbox provider long before it fails at the recipient, and the causes are
+boringly mechanical. All of it is checkable locally, so none of it costs anything or sends anything.
+
+**Your sending domain**, over DNS: MX, SPF, DKIM across nine common selectors, DMARC, and the
+volume ceiling on a personal mailbox. Every check says what is wrong and what to do about it, and
+shows the record verbatim so you can compare it against your DNS panel.
+
+Two things it is careful about. A DNS lookup that *failed* is reported as "could not check", never
+as "you have no SPF" — telling someone their domain is misconfigured when the resolver timed out is
+a confident lie about their infrastructure. And `~all` is not a finding: every large sender uses it,
+and flagging Stripe for it would only prove the check was wrong.
+
+**Each message**, on the review screen: the phrases filters actually weight, link count, a shouted
+subject, length, and stray HTML in a plain-text send. Scored on the message the recipient receives,
+signature included. It only appears when something is wrong — a green "0 issues" panel on every
+draft trains you to skip the box exactly when it matters.
+
+## When it sends
+
+A cold email that lands at 03:14 on a Sunday is read as a machine before it is read at all. Set a
+window in Settings — hours and days, in your own timezone, which the page names — and sends outside
+it are refused rather than queued. Nothing is lost: approved drafts wait, and sending picks up on
+its own when the window opens. The Outbox says which window is in force and how long until it opens.
+
+Off by default, so a first send while you are testing is not silently refused because it is Sunday.
+
+## Bounces
+
+A bounce arrives in the same mailbox as a reply and matches the same thread. Until it was sorted
+out, all three of bounce, out-of-office and reply were recorded as "they replied" — which marks the
+company as answered, stops the follow-up sequence, and points the reply drafter at MAILER-DAEMON.
+The expensive half is invisible: an address that hard-bounced was never suppressed, so other
+campaigns kept mailing a mailbox that does not exist, and repeatedly mailing dead addresses is one
+of the fastest ways to lose a sending reputation.
+
+They are told apart by header rather than by wording, so a reply that happens to say "I am away
+next week" is still a reply. Addresses that come back as non-existent (5.1.x, 5.4.4) are suppressed
+automatically — the mailbox is gone, nothing is lost by never writing to it again. A 5.7.1 policy
+rejection is deliberately *not* suppressed: that can be about the content or a temporary block, and
+silently discarding a real lead over one would be worse than the bounce.
+
 ## Quality flags
 
 Cold email fails in predictable ways, so the ones a careful reader would catch are detected when
@@ -119,7 +165,10 @@ You can see this in the UI: every draft has a **Sources** button showing the quo
 - Exceed the daily cap. That's counted from what actually left in the last 24 hours, so
   restarting the app cannot get round it.
 - Run a shell command. The research agent is sandboxed at four independent layers; see below.
-- Follow up anyone who replied, or anyone on the never-contact list.
+- Follow up anyone who replied, or anyone on the never-contact list. A bounce and an
+  out-of-office are not replies and do not stop a sequence; a person answering does.
+- Send outside your sending window, if you set one. Refused, not queued — the drafts wait.
+- Keep mailing an address that came back as non-existent.
 - Email the same person from two different campaigns. Two unrelated cold emails from one sender
   is the fastest way to be marked as spam, and nothing else would have caught it.
 - Add an opt-out footer, unless you switch it on in Settings. It's off by default.
@@ -160,10 +209,10 @@ coldcall 0.1.0
 
   ok    opencode               /Users/you/.opencode/bin/opencode
   ok    node                   24.11.0
-  ok    database               /Users/you/.coldcall/coldcall.db (schema v6)
+  ok    database               /Users/you/.coldcall/coldcall.db (schema v8)
   ok    integrity              no dangling references
   ok    writing model          openai/gpt-5.6-terra-pro
-  ok    research model         opencode/nemotron-3-ultra-free
+  ok    research model         opencode/big-pickle
   ok    mailbox                you@gmail.com
 ```
 
@@ -187,7 +236,9 @@ coldcall 0.1.0
 ```
 
 The SMTP password goes into the macOS login Keychain where available. That keeps it out of
-`coldcall.db` — the file people back up and paste into bug reports. It does **not** stop another
+`coldcall.db` — the file people back up and paste into bug reports. Every write to the settings
+row is sanitised and so is every read, and a database written by an older build that has a
+password in it is cleaned up on the next start. It does **not** stop another
 process running as you from reading it, and nothing could, for an app that sends mail unattended.
 The Setup screen tells you which of the two is in use.
 
