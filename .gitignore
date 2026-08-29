@@ -6,3 +6,7 @@ dist/
 .coldcall/
 secrets.json
 coldcall.db*
+
+# ...but the design decision log is project memory, not a runtime log: the next session
+# reads it to avoid re-litigating choices this one already made.
+!.tastemaker/decisions.log

@@ -1,0 +1,15 @@
+2026-08-29 pending-review | surface: campaign page | axis: information density
+  Added a rejection-summary panel that groups gate rejections by the kind rejected, quiet by
+  default and louder past 60% rejected. Chose an inline panel over a separate screen so a
+  mis-aimed campaign is visible without navigating. Not yet confirmed with the user.
+
+2026-08-29 pending-review | surface: tokens | axis: shape/depth
+  Added --inset (surface in light, bg in dark) for panels recessed inside a .card. Measured:
+  light raised/surface 1.12, dark raised/surface 1.07 vs raised/bg 1.20. Not yet seen rendered
+  by a human — the browser tooling was unavailable this session, so this is reasoned from the
+  contrast numbers rather than looked at.
+
+2026-08-29 pending-review | surface: whole UI | axis: scope
+  Ran audit rather than redesign: the style lock was already established and implemented, and
+  both mechanical gates came back clean, so effort went to information design and features
+  instead of restyling. Worth confirming that was the right read of "make it good".
