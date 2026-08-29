@@ -14,7 +14,7 @@ import { openDb, ulid, now, type Db } from "../../src/server/db/index.ts";
 import { migrate } from "../../src/server/db/migrate.ts";
 import { getSetting, seedDefaults, setSetting } from "../../src/server/db/settings.ts";
 import { setSecret } from "../../src/server/mail/secrets.ts";
-import { SendRunner, sendOne, suppress } from "../../src/server/queue/sendQueue.ts";
+import { SendRunner, sendOne, suppress, unapproveDraft } from "../../src/server/queue/sendQueue.ts";
 import { startSmtpSink, type SmtpSink } from "../fixtures/smtp-sink.ts";
 
 function world(): { db: Db; ids: Record<string, string> } {
@@ -292,4 +292,61 @@ test("the runner survives SMTP being unreachable and does not lose the draft", a
     const status = (db.prepare("SELECT status FROM email_draft WHERE id=?").get(draftId) as any).status;
     assert.ok(status === "approved" || status === "sent", `unexpected status ${status}`);
   } finally { runner.stop(); }
+});
+
+/* Taking an approval back. */
+
+test("an approved draft can be put back in the review queue", async () => {
+  const { db, ids } = world();
+  const draftId = approvedDraft(db, ids);
+
+  assert.deepEqual(unapproveDraft(db, draftId), { ok: true });
+  const row = db.prepare("SELECT status, approved_at FROM email_draft WHERE id=?").get(draftId) as any;
+  assert.equal(row.status, "needs_review");
+  assert.equal(row.approved_at, null, "otherwise it still looks approved to anything reading that column");
+});
+
+test("an approval cannot be taken back once the message has left", async () => {
+  await withSink(async (sink) => {
+    const { db, ids } = world();
+    await setSecret(db, "smtp.password", "pw");
+    const draftId = approvedDraft(db, ids);
+    assert.equal((await sendOne(db, draftId, cfgFor(sink))).sent, true);
+
+    // Undo here would be pretending a sent email can be recalled.
+    const out = unapproveDraft(db, draftId);
+    assert.equal(out.ok, false);
+    assert.match(out.reason ?? "", /already been sent/);
+    assert.equal((db.prepare("SELECT status FROM email_draft WHERE id=?").get(draftId) as any).status, "sent");
+  });
+});
+
+test("un-approving a draft nobody approved is refused, not silently accepted", () => {
+  const { db, ids } = world();
+  const d = ulid(), v = ulid();
+  db.prepare("INSERT INTO email_draft (id,campaign_id,campaign_company_id,contact_id,status,step_number,created_at,updated_at) VALUES (?,?,?,?,'needs_review',1,?,?)")
+    .run(d, ids.c, ids.cc, ids.ct, now(), now());
+  db.prepare("INSERT INTO email_draft_version (id,draft_id,version,subject,body_text,author,created_at) VALUES (?,?,1,?,?,'llm',?)")
+    .run(v, d, "s", "b", now());
+
+  const out = unapproveDraft(db, d);
+  assert.equal(out.ok, false);
+  assert.match(out.reason ?? "", /not waiting to be sent/);
+});
+
+test("a draft put back in review does not get sent by the runner", async () => {
+  await withSink(async (sink) => {
+    const { db, ids } = world();
+    await setSecret(db, "smtp.password", "pw");
+    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0 });
+    const draftId = approvedDraft(db, ids);
+    unapproveDraft(db, draftId);
+
+    const runner = new SendRunner(db, () => cfgFor(sink));
+    runner.start();
+    try {
+      await settle(900);
+      assert.equal(sink.messages.length, 0, "undo has to hold against the thing that actually sends");
+    } finally { runner.stop(); }
+  });
 });

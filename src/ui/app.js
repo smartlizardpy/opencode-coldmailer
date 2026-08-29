@@ -62,12 +62,24 @@ async function api(path, body) {
 }
 
 let toastTimer;
-function toast(msg, bad = false) {
+/**
+ * `action` puts one button in the toast - used for undo, which only makes sense in the moment
+ * it appears. It gets a longer life than a plain message, because three seconds is not enough
+ * to notice you did the wrong thing and reach for the mouse.
+ */
+function toast(msg, bad = false, action) {
   const t = $("#toast");
-  t.textContent = msg;
   t.className = `toast${bad ? " bad" : ""}`;
+  t.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.className = "toast-action";
+    b.textContent = action.label;
+    b.onclick = () => { t.classList.add("hidden"); action.run(); };
+    t.append(b);
+  }
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add("hidden"), bad ? 7000 : 3200);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), action ? 9000 : bad ? 7000 : 3200);
 }
 const fail = (e) => { console.error(e); toast(e?.message || String(e), true); };
 
@@ -274,7 +286,10 @@ document.addEventListener("keydown", (e) => {
     const d = S.drafts[S.reviewIndex];
     if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); selectDraft(S.reviewIndex + 1); }
     if (e.key === "k" || e.key === "ArrowUp")   { e.preventDefault(); selectDraft(S.reviewIndex - 1); }
+    // `a` approves and `u` takes it back, so the whole review pass stays on the keyboard -
+    // including the correction. Reaching for the mouse to undo defeats the point of the queue.
     if (e.key === "a" && d) { e.preventDefault(); approveDraft(d.draft_id); }
+    if (e.key === "u" && d) { e.preventDefault(); unapproveDraft(d.draft_id); }
     if (e.key === "s" && d) { e.preventDefault(); skipDraft(d.draft_id); }
     if (e.key === "e" && d) { e.preventDefault(); $("#btnEdit")?.click(); }
     if (e.key === "r" && d) { e.preventDefault(); $("#btnRewrite")?.click(); }
@@ -286,6 +301,7 @@ function showShortcuts() {
   const rows = [
     ["⌘K / Ctrl+K", "Command palette"], ["?", "This list"],
     ["j / k", "Next / previous draft in Review"], ["a", "Approve draft"],
+    ["u", "Put an approved draft back in review"],
     ["e", "Edit draft"], ["r", "Rewrite draft"], ["s", "Skip draft"],
   ];
   $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="palette" role="dialog" aria-modal="true">
@@ -676,7 +692,7 @@ async function renderReview() {
       </select>
       ${S.draftFilter === "needs_review" && S.drafts.length ? `
         <button class="btn ghost sm" id="btnApproveClean">${icon("check")} Approve all unflagged</button>` : ""}
-      <span class="tag" style="margin-left:auto">${icon("antenna-signal")} j / k to move · a to approve · ? for all keys</span>
+      <span class="tag" style="margin-left:auto">${icon("antenna-signal")} j / k to move · a to approve · u to undo · ? for all keys</span>
     </div>
     ${unsigned ? `<div class="flagbox" style="margin-bottom:var(--s5)">
       ${icon("warning-triangle")} <b>These emails have no name at the bottom</b>
@@ -765,6 +781,9 @@ async function drawLetter() {
       </div>
       <div class="letter-foot">
         ${d.status === "sent" ? `<span class="tag ok">${icon("check")} sent ${esc(ago(d.sent_at))}</span>`
+        : d.status === "approved" ? `<span class="tag ok">${icon("check")} approved, waiting to send</span>
+           <button class="btn ghost" id="btnUnapprove">${icon("refresh")} Put back in review</button>
+           <button class="btn ghost" id="btnEdit">${icon("edit-pencil")} Edit</button>`
         : `<button class="btn" id="btnApprove">${icon("check")} Approve <kbd style="opacity:.7">a</kbd></button>
            <button class="btn ghost" id="btnEdit">${icon("edit-pencil")} Edit</button>
            <button class="btn ghost" id="btnRewrite">${icon("refresh")} Rewrite…</button>
@@ -781,6 +800,7 @@ async function drawLetter() {
     </details>` : ""}`;
 
   $("#btnApprove")?.addEventListener("click", () => approveDraft(d.draft_id));
+  $("#btnUnapprove")?.addEventListener("click", () => unapproveDraft(d.draft_id));
   $("#btnSkip")?.addEventListener("click", () => skipDraft(d.draft_id));
   $("#btnEdit")?.addEventListener("click", () => editDialog(full));
   $("#btnRewrite")?.addEventListener("click", () => rewriteDialog(d.draft_id));
@@ -794,13 +814,26 @@ async function drawLetter() {
 async function approveDraft(id) {
   try {
     await api(`/api/drafts/${id}/approve`, {});
-    toast("Approved");
+    // Review is driven from the keyboard and `a` moves straight on, so the only moment you
+    // realise you approved the wrong one is right now.
+    toast("Approved", false, { label: "Undo", run: () => unapproveDraft(id) });
     const at = S.reviewIndex;
     await renderReview();
     selectDraft(Math.min(at, S.drafts.length - 1));
     loadHealth();
   } catch (e) { fail(e); }
 }
+async function unapproveDraft(id) {
+  try {
+    await api(`/api/drafts/${id}/unapprove`, {});
+    toast("Back in the review queue");
+    const at = S.reviewIndex;
+    await renderReview();
+    selectDraft(Math.min(at, S.drafts.length - 1));
+    loadHealth();
+  } catch (e) { fail(e); }
+}
+
 async function skipDraft(id) {
   try {
     await api(`/api/drafts/${id}/skip`, {});

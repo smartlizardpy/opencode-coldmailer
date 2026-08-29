@@ -9,7 +9,7 @@ import { deleteSecret, getSecret, setSecret, storageDescription } from "../mail/
 import { verifySmtp, sendMail, newMessageId, explainSmtpError, GMAIL_PRESET } from "../mail/smtp.ts";
 import { auditCached, scoreMessage, warmAudit } from "../mail/deliverability.ts";
 import { verifyImap, pollReplies, fetchReplyBody, GMAIL_IMAP } from "../mail/imap.ts";
-import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress, SUPPRESSION_REASONS } from "../queue/sendQueue.ts";
+import { approveDraft, contactedElsewhere, isSuppressed, sendGuards, sendOne, suppress, unapproveDraft, SUPPRESSION_REASONS } from "../queue/sendQueue.ts";
 import { addManualCompanies, discoverCompanies, enrichCompany, findContacts, prefetchCompanies, briefOf } from "../research/pipeline.ts";
 import { parseCompanyList } from "../research/importList.ts";
 import { composeDraft, saveHumanEdit, renderedBody, productForDraft } from "../research/compose.ts";
@@ -629,6 +629,13 @@ export function registerRoutes(r: Router, app: AppContext): void {
     const s = isSuppressed(db, ct.email);
     if (s.suppressed) throw bad(`${ct.email} is on the suppression list (${s.reason})`, "SUPPRESSED");
     approveDraft(db, params.id);
+    app.bus.emit("drafts:changed", {});
+    return { ok: true };
+  });
+
+  r.post("/api/drafts/:id/unapprove", ({ params }: RouteCtx) => {
+    const out = unapproveDraft(db, params.id);
+    if (!out.ok) throw bad(`Can't take that back - ${out.reason}.`, "CANNOT_UNAPPROVE", 409);
     app.bus.emit("drafts:changed", {});
     return { ok: true };
   });

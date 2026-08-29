@@ -442,3 +442,11 @@ details[open] summary::before{transform:rotate(90deg)}
 /* aria-pressed carries the state, so the styling and the accessibility tree cannot disagree. */
 .daybtn[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
 .daybtn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.toast-action {
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  margin-left: var(--s3); padding: 3px 10px; border-radius: var(--r-sm);
+  background: transparent; color: inherit; border: 1px solid currentColor; opacity: .85;
+}
+.toast-action:hover { opacity: 1; }
+.toast-action:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

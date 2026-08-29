@@ -92,6 +92,29 @@ export function approveDraft(db: Db, draftId: string): void {
 }
 
 /**
+ * Put an approved draft back in the review queue.
+ *
+ * Review is keyboard-driven - `a` approves and jumps to the next one - so a mis-keyed `a` used
+ * to put an email in the send queue with no way back at all. That is the wrong shape for a
+ * screen whose whole promise is that nothing sends without you.
+ *
+ * Refuses once a send has been attempted. A row in send_log means the message either left or
+ * is in flight, and un-approving it then would be pretending something can be recalled.
+ */
+export function unapproveDraft(db: Db, draftId: string): { ok: boolean; reason?: string } {
+  const live = db.prepare(
+    "SELECT status FROM send_log WHERE draft_id=? AND status IN ('queued','sending','sent') LIMIT 1",
+  ).get(draftId) as { status: string } | undefined;
+  if (live) {
+    return { ok: false, reason: live.status === "sent" ? "it has already been sent" : "it is being sent right now" };
+  }
+  const res = db.prepare(
+    "UPDATE email_draft SET status='needs_review', approved_at=NULL, updated_at=? WHERE id=? AND status='approved'",
+  ).run(now(), draftId);
+  return res.changes > 0 ? { ok: true } : { ok: false, reason: "it is not waiting to be sent" };
+}
+
+/**
  * Has this person already answered us?
  *
  * dueFollowUps checks this when it generates a step, but a draft can also be approved by hand,
