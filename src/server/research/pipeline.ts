@@ -456,8 +456,11 @@ export async function enrichCompany(deps: PipelineDeps, campaignCompanyId: strin
         floor: Number(campaign.min_fit_score ?? 45),
         targetKind: rc.value.target_kind, entityKind: rc.value.entity_kind,
       });
-      rejectedByGate = decision.rejected;
-      if (decision.rejected) {
+      // A human overrule survives re-enrichment. Without this, running the pipeline again on
+      // an overridden company silently re-rejects it and the override looks like it never
+      // took - the single most confusing way an escape hatch can fail.
+      rejectedByGate = decision.rejected && !cc.gate_override;
+      if (rejectedByGate) {
         db.prepare("UPDATE campaign_company SET status='rejected', selected=0, rejected_reason=?, updated_at=? WHERE id=?")
           .run(decision.reason ?? "rejected", now(), campaignCompanyId);
       }

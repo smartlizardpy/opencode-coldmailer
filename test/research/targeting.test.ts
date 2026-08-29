@@ -106,3 +106,45 @@ test("the floor is per-campaign and settable", () => {
   db.prepare("INSERT INTO campaign (id,product_id,name,min_fit_score,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(c, p, "C", 70, t, t);
   assert.equal((db.prepare("SELECT min_fit_score FROM campaign WHERE id=?").get(c) as any).min_fit_score, 70);
 });
+
+/* --------------------------------------- the escape hatch the stricter gate needs */
+
+test("an overridden company survives re-enrichment instead of being re-rejected", () => {
+  // The failure this guards: a person overrules the gate, the pipeline runs again, and the
+  // gate quietly rejects it a second time - so the override looks like it never took.
+  const db = openDb(":memory:");
+  migrate(db);
+  const t = now();
+  const p = ulid(), c = ulid(), co = ulid(), cc = ulid();
+  db.prepare("INSERT INTO product (id,name,created_at,updated_at) VALUES (?,?,?,?)").run(p, "P", t, t);
+  db.prepare("INSERT INTO campaign (id,product_id,name,created_at,updated_at) VALUES (?,?,?,?,?)").run(c, p, "C", t, t);
+  db.prepare("INSERT INTO company (id,domain,name,created_at,updated_at) VALUES (?,?,?,?,?)").run(co, "x.com", "X", t, t);
+  db.prepare("INSERT INTO campaign_company (id,campaign_id,company_id,status,created_at,updated_at) VALUES (?,?,?,'rejected',?,?)")
+    .run(cc, c, co, t, t);
+
+  const row = () => db.prepare("SELECT status, gate_override FROM campaign_company WHERE id=?").get(cc) as any;
+  assert.equal(row().gate_override, 0, "override is off by default");
+
+  db.prepare("UPDATE campaign_company SET status='qualified', selected=1, gate_override=1 WHERE id=?").run(cc);
+  assert.equal(row().gate_override, 1);
+
+  // The gate still says no; the override is what changes the outcome.
+  const verdict = gateDecision({ matchesTarget: false, fitScore: 0, floor: 45 });
+  assert.equal(verdict.rejected, true, "the gate's own opinion is unchanged");
+  const overridden = row().gate_override;
+  assert.equal(verdict.rejected && !overridden, false, "but the pipeline must not act on it");
+});
+
+test("a retry clears the override, so it does not silently outlive the rejection it answered", () => {
+  const db = openDb(":memory:");
+  migrate(db);
+  const t = now();
+  const p = ulid(), c = ulid(), co = ulid(), cc = ulid();
+  db.prepare("INSERT INTO product (id,name,created_at,updated_at) VALUES (?,?,?,?)").run(p, "P", t, t);
+  db.prepare("INSERT INTO campaign (id,product_id,name,created_at,updated_at) VALUES (?,?,?,?,?)").run(c, p, "C", t, t);
+  db.prepare("INSERT INTO company (id,domain,name,created_at,updated_at) VALUES (?,?,?,?,?)").run(co, "y.com", "Y", t, t);
+  db.prepare("INSERT INTO campaign_company (id,campaign_id,company_id,status,gate_override,created_at,updated_at) VALUES (?,?,?,'qualified',1,?,?)")
+    .run(cc, c, co, t, t);
+  db.prepare("UPDATE campaign_company SET status='discovered', rejected_reason=NULL, gate_override=0 WHERE id=?").run(cc);
+  assert.equal((db.prepare("SELECT gate_override FROM campaign_company WHERE id=?").get(cc) as any).gate_override, 0);
+});

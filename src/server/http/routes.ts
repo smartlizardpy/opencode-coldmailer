@@ -342,7 +342,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
 
   r.get("/api/campaigns/:id/companies", ({ params }: RouteCtx) => db.prepare(
     `SELECT cc.id, cc.status, cc.relevance_score, cc.relevance_reason, cc.matched_signal, cc.selected,
-       cc.discovered_via, cc.discovered_url, cc.error_code, cc.error_message, cc.rejected_reason,
+       cc.discovered_via, cc.discovered_url, cc.error_code, cc.error_message, cc.rejected_reason, cc.gate_override,
        cc.contact_notes,
        co.id company_id, co.name, co.domain, co.website_url, co.city, co.summary,
        (SELECT COUNT(*) FROM claim cl WHERE cl.campaign_company_id=cc.id AND cl.verified=1) verified_claims,
@@ -412,13 +412,33 @@ export function registerRoutes(r: Router, app: AppContext): void {
     return { ok: true };
   });
 
+  /**
+   * Overrule the qualification gate for one company.
+   *
+   * Distinct from `retry`, which clears the rejection and re-runs the same gate against the
+   * same site - reaching the same verdict. This keeps the enrichment and the recorded reason
+   * and proceeds anyway, which is what a person actually means by "no, this one IS right".
+   */
+  r.post("/api/companies/:ccId/override", ({ params }: RouteCtx) => {
+    const cc = db.prepare("SELECT campaign_id, status, rejected_reason FROM campaign_company WHERE id=?").get(params.ccId) as any;
+    if (!cc) throw bad("not found", "NOT_FOUND", 404);
+    if (cc.status !== "rejected") throw bad("this company was not rejected by the gate", "NOT_REJECTED");
+    db.prepare(
+      `UPDATE campaign_company SET status='qualified', selected=1, gate_override=1, updated_at=?
+       WHERE id=?`,
+    ).run(now(), params.ccId);
+    app.log(`gate overruled for ${params.ccId} (was: ${cc.rejected_reason ?? "no reason recorded"})`);
+    app.bus.emit("companies:changed", { campaignId: cc.campaign_id });
+    return { ok: true };
+  });
+
   /** Put one company back in the queue. Clears the failure so it is genuinely re-attempted. */
   r.post("/api/companies/:ccId/retry", ({ params }: RouteCtx) => {
     const cc = db.prepare("SELECT campaign_id FROM campaign_company WHERE id=?").get(params.ccId) as any;
     if (!cc) throw bad("not found", "NOT_FOUND", 404);
     db.prepare(
       `UPDATE campaign_company SET status='discovered', selected=1, error_code=NULL,
-         error_message=NULL, rejected_reason=NULL, contact_notes='[]', updated_at=? WHERE id=?`,
+         error_message=NULL, rejected_reason=NULL, contact_notes='[]', gate_override=0, updated_at=? WHERE id=?`,
     ).run(now(), params.ccId);
     // Drop the cached pages too: a retry that reads the same cached failure is not a retry.
     db.prepare("DELETE FROM source_page WHERE company_id=(SELECT company_id FROM campaign_company WHERE id=?)")

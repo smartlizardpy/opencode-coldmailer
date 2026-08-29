@@ -436,7 +436,8 @@ details[open] summary::before{transform:rotate(90deg)}
 .daybtn {
   font: inherit; font-size: 12px; padding: 6px 9px; cursor: pointer;
   border: 1px solid var(--border); background: var(--raised); color: var(--muted);
-  border-radius: var(--r-sm); transition: all var(--fast) var(--ease);
+  border-radius: var(--r-sm);
+  transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease);
 }
 .daybtn:hover { border-color: var(--muted); }
 /* aria-pressed carries the state, so the styling and the accessibility tree cannot disagree. */
@@ -450,3 +451,7 @@ details[open] summary::before{transform:rotate(90deg)}
 }
 .toast-action:hover { opacity: 1; }
 .toast-action:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Row actions sit on one line and stay right-aligned as buttons appear and disappear -
+   a rejected row gains an "Include anyway" button and must not reflow the column. */
+.rowacts { display: flex; gap: var(--s2); align-items: center; justify-content: flex-end; white-space: nowrap; }

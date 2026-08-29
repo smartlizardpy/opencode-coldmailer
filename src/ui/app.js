@@ -586,10 +586,16 @@ async function renderCampaigns() {
                   : r.error_message ? `<div class="cellsub" style="color:var(--warn)">${esc(r.error_message)}</div>`
                   : r.relevance_reason ? `<div class="cellsub">${esc(r.relevance_reason)}</div>` : ""}</td>
             <td>${r.relevance_score != null ? `<span class="tag ${r.relevance_score >= .8 ? "ok" : r.relevance_score >= .5 ? "" : "warn"}">${Math.round(r.relevance_score * 100)}</span>` : "—"}</td>
-            <td><span class="tag ${r.status === "failed" || r.status === "rejected" ? "bad" : ["drafted", "sent", "contacts_found"].includes(r.status) ? "ok" : ""}">${esc(r.status)}</span></td>
+            <td><span class="tag ${r.status === "failed" || r.status === "rejected" ? "bad" : ["drafted", "sent", "contacts_found"].includes(r.status) ? "ok" : ""}">${esc(r.status)}</span>${
+              r.gate_override ? ` <span class="tag warn" title="A person overruled the targeting gate for this company">overruled</span>` : ""}</td>
             <td class="num">${num(r.verified_claims)}</td>
             <td class="num">${num(r.contacts)}</td>
-            <td><button class="btn sm ghost" data-detail="${esc(r.id)}" aria-label="Evidence for ${esc(r.name)}" title="Evidence">${icon("eye")}</button></td>
+            <td class="rowacts">
+              <button class="btn sm ghost" data-detail="${esc(r.id)}" aria-label="Evidence for ${esc(r.name)}" title="Evidence">${icon("eye")}</button>
+              ${r.status === "rejected" ? `<button class="btn sm ghost" data-override="${esc(r.id)}"
+                   aria-label="Include ${esc(r.name)} anyway, overruling the targeting gate"
+                   title="The gate got this one wrong — include it anyway">Include anyway</button>` : ""}
+            </td>
           </tr>`).join("")}</tbody></table></div>`
         : empty("binocular", "Nothing here yet",
             S.companies.length ? "No company matches this filter." : "Search the web, or paste a list of domains above.")}
@@ -599,6 +605,13 @@ async function renderCampaigns() {
   $("#campSelect").onchange = (e) => { S.campaign = e.target.value; S.filter = ""; go("campaigns"); };
   $("#btnNewCampaign").onclick = newCampaignDialog;
   $("#btnCampSettings").onclick = () => campaignSettingsDialog(camp);
+  $$("[data-override]").forEach((b) => b.onclick = async () => {
+    try {
+      await api(`/api/companies/${b.dataset.override}/override`, {});
+      toast("Included — the gate's verdict is kept on the record");
+      renderCampaigns();
+    } catch (e) { fail(e); }
+  });
   $("#coFilter").oninput = debounce((e) => { S.filter = e.target.value; renderCampaigns(); }, 220);
   $("#coStatus").onchange = (e) => { S.companyFilter = e.target.value; renderCampaigns(); };
   $("#btnExport").onclick = () => exportDialog(camp.id);
