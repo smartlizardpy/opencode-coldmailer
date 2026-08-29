@@ -32,7 +32,9 @@ const DAEMONS = [
 
 function header(headers: string, name: string): string | undefined {
   // Unfolds continuation lines, which is where Diagnostic-Code almost always wraps.
-  const re = new RegExp(`^${name}:[ \\t]*([\\s\\S]*?)(?:\\r?\\n(?![ \\t]))`, "im");
+  // End of input is a terminator too. It only worked before because of the appended newline
+  // below, which is the kind of thing that stays true right up until someone removes it.
+  const re = new RegExp(`^${name}:[ \\t]*([\\s\\S]*?)(?:\\r?\\n(?![ \\t])|(?![\\s\\S]))`, "im");
   const m = re.exec(headers.endsWith("\n") ? headers : `${headers}\n`);
   return m ? m[1].replace(/\r?\n[ \t]+/g, " ").trim() : undefined;
 }

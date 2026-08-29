@@ -29,6 +29,26 @@ export async function verifyImap(cfg: ImapConfig, password: string): Promise<{ o
   }
 }
 
+/**
+ * Every Message-ID this inbound message says it is answering, from the envelope and from the
+ * raw headers, most specific first.
+ *
+ * Exported because reply matching depends entirely on it: if this returns nothing, a real
+ * reply from a real prospect is recorded as unmatched and nobody is ever shown it.
+ */
+export function threadRefs(headerText: string, envelopeInReplyTo?: unknown): string[] {
+  return [
+    ...idsFrom(envelopeInReplyTo),
+    ...idsFrom(/in-reply-to:[ \t]*([^\r\n]+)/i.exec(headerText)?.[1]),
+    // References is folded across lines more often than not, so the capture has to run past a
+    // newline that is followed by whitespace. The terminator must also allow the END OF THE
+    // BLOCK: with only `\r?\n(?![ \t])`, a References header that happens to be last matched
+    // nothing at all and the whole thread chain was lost. `[ \t]` rather than `\s`, so the
+    // blank line that ends the header block still terminates the capture.
+    ...idsFrom(/references:[ \t]*([\s\S]*?)(?:\r?\n(?![ \t])|(?![\s\S]))/i.exec(headerText)?.[1]),
+  ];
+}
+
 function idsFrom(value: unknown): string[] {
   if (!value) return [];
   const s = Array.isArray(value) ? value.join(" ") : String(value);
@@ -66,11 +86,7 @@ export async function pollReplies(db: Db, cfg: ImapConfig, opts: { sinceMs?: num
         if (messageId && db.prepare("SELECT 1 FROM reply WHERE message_id=?").get(messageId)) continue;
 
         const headerText = msg.headers?.toString() ?? "";
-        const refs = [
-          ...idsFrom(env?.inReplyTo),
-          ...idsFrom(/in-reply-to:\s*([^\r\n]+)/i.exec(headerText)?.[1]),
-          ...idsFrom(/references:\s*([\s\S]*?)\r?\n(?!\s)/i.exec(headerText)?.[1]),
-        ];
+        const refs = threadRefs(headerText, env?.inReplyTo);
         if (refs.length === 0) continue;
 
         let send: any;
