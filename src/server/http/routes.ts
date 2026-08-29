@@ -407,6 +407,23 @@ export function registerRoutes(r: Router, app: AppContext): void {
     return { approved, skipped };
   });
 
+  /**
+   * Turn rough notes into a usable goal and target. Commits nothing - it hands back a
+   * suggestion the person can accept, edit, or ignore.
+   */
+  r.post("/api/campaigns/reframe", async ({ body }: RouteCtx) => {
+    const name = String(body.name ?? ""), goal = String(body.goal ?? ""), target = String(body.target ?? "");
+    if (!`${name}${goal}${target}`.trim()) throw bad("write something first, however rough");
+    const r2 = await app.llm.run<{ name: string; goal: string; target_description: string; notes: string[] }>({
+      task: "campaign.reframe",
+      system: P.REFRAME_SYSTEM,
+      prompt: P.reframePrompt({ name, goal, target }),
+      schema: P.REFRAME_SCHEMA,
+      priority: "interactive",
+    });
+    return r2.value;
+  });
+
   /** Dry-run the targeting gate against one site. Commits nothing. */
   r.post("/api/campaigns/:id/test-target", async ({ params, body }: RouteCtx) => {
     if (!String(body.website ?? "").trim()) throw bad("enter a domain to test");

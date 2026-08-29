@@ -9,6 +9,22 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="/app.css">
+<script>
+  /* Runs before first paint. Without it, a machine set to dark paints the whole shell dark and
+     then flips to light the moment app.js runs - a visible flash on every single navigation.
+     Kept inline and tiny for that reason: an external file would be too late. */
+  (function () {
+    var t = "light";
+    try {
+      var stored = localStorage.getItem("cc-theme");
+      /* An older build wrote "system" here automatically on first load, so a stored "system"
+         is not evidence anyone chose it. Treat it as unset and let the default win; a real
+         choice of system is re-made with one click. */
+      if (stored && stored !== "system") t = stored;
+    } catch (e) { /* private mode */ }
+    document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 </head>
 <body>
 <div id="sprite"></div>

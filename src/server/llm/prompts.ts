@@ -516,3 +516,63 @@ ${body}
 Name the kind the target asks for, name the kind this actually is, then decide. Being about the
 same subject is not enough - it has to BE the same kind of organisation.`;
 }
+
+/* ---------------------------------------------------------------- reframe */
+
+export const REFRAME_SYSTEM = `You turn a rough, half-finished campaign description into the two
+fields the tool actually needs. The person is describing their own work quickly, often mixing
+languages, often writing one run-on sentence that mixes what their product IS with what they
+want from the email. That is normal. Your job is to separate those and make each one usable.
+
+**goal** is what you want THIS EMAIL to achieve - the ask, in one line. Not a description of
+your product, not your business model. "agree an in-app advertising partnership" is a goal.
+"our new app that we will launch and advertising inside it" is not: it describes the product.
+If the ask is implied rather than stated, name the smallest concrete first step a stranger
+could say yes to.
+
+**target_description** is the KIND of organisation to look for. It must name a category of
+organisation, not a topic, because a search filter built on a topic returns everything adjacent
+to it. Include size, independence, and geography when you can infer them. Keep the person's own
+local-language term for the category alongside the English one - the search runs in their market
+and "spor salonu" finds things "gym" does not.
+
+Rules:
+- Never invent a place, a size, a budget or an industry the person did not imply. If geography
+  is only implied by the language they wrote in, say so in notes rather than asserting it.
+- Keep proper nouns exactly as written. A product called Avenza stays Avenza.
+- If the input is too thin to reframe honestly, say so in notes and leave that field close to
+  what they wrote rather than inventing detail.
+- Write goal and target_description in the language the person used for that field. Keep the
+  local category term either way.
+- notes describe what THIS TOOL did, impersonally: "Split the product description out of the
+  ask", not "you separated the product description". Never write them as if the person did the
+  rewriting - they did not, and it reads as the tool being confused about who is who.
+- notes must not contradict the fields. If a note says an attribute was not assumed, that
+  attribute must not appear in target_description. This is the single most damaging failure
+  here: a target that quietly asserts "independent" while the note says independence was not
+  assumed is worse than either alone, because it looks checked.
+- notes are how they catch you being wrong, so they matter more than the polish.`;
+
+export const REFRAME_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["name", "goal", "target_description", "notes"],
+  properties: {
+    name: { type: "string", maxLength: 60, description: "a short campaign name, their words" },
+    goal: { type: "string", maxLength: 200, description: "the ask, one line" },
+    target_description: { type: "string", maxLength: 500, description: "the KIND of organisation" },
+    notes: {
+      type: "array", maxItems: 5, items: { type: "string", maxLength: 160 },
+      description: "what you changed, and anything you guessed",
+    },
+  },
+} as const;
+
+export function reframePrompt(a: { name?: string; goal?: string; target?: string }): string {
+  return `Here is what they typed. Some or all of it may be rough, mixed-language, or empty.
+
+Campaign name: ${a.name?.trim() || "(blank)"}
+What they want from the email: ${a.goal?.trim() || "(blank)"}
+Who they are looking for: ${a.target?.trim() || "(blank)"}
+
+Rewrite these into a name, a goal, and a target_description, and tell them what you changed.`;
+}

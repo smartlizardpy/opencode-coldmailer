@@ -486,3 +486,46 @@ details[open] summary::before{transform:rotate(90deg)}
   display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); font-size: 13px; color: var(--muted); }
 .rs-kinds li { display: flex; align-items: baseline; gap: var(--s2); }
 .rs-n { color: var(--text); font-weight: 500; }
+
+/* ─────────────────────────────────────────────── dialog (modal form)
+   A dialog can be taller than the window. .scrim is position:fixed and .palette is
+   overflow:hidden, so before this a tall form ran off the bottom of the screen with nothing
+   to scroll and the confirm button simply could not be reached. Title and buttons are pinned;
+   only the fields scroll. */
+.palette.dialog {
+  width: min(620px, 94vw);
+  max-height: min(82vh, 780px);
+  display: flex;
+  flex-direction: column;
+}
+.dialog-head {
+  flex: none; margin: 0; padding: var(--s5) var(--s5) var(--s4);
+  font-family: var(--display); font-size: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.dialog-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: var(--s5); overscroll-behavior: contain;
+}
+.dialog-foot {
+  flex: none; display: flex; gap: var(--s2); justify-content: flex-end;
+  padding: var(--s4) var(--s5); border-top: 1px solid var(--border); background: var(--raised);
+}
+/* The scrim scrolls too, so a viewport shorter than the dialog's own minimum still reaches
+   the buttons rather than clipping them. */
+.scrim { overflow-y: auto; padding-bottom: var(--s8); }
+@media (max-height: 620px) {
+  .scrim { padding-top: var(--s5); align-items: start; }
+  .palette.dialog { max-height: calc(100vh - var(--s10)); }
+}
+
+/* Reframe suggestion. Shown beside what you wrote rather than replacing it, because a rewrite
+   you did not read is how a campaign ends up aimed at something you never chose. */
+.reframe { margin-top: var(--s3); padding: var(--s4); border-radius: var(--r);
+  border: 1px solid var(--primary); background: var(--inset); }
+.reframe-field { display: grid; grid-template-columns: 92px 1fr; gap: var(--s3);
+  align-items: baseline; padding: var(--s2) 0; font-size: 13.5px; }
+.reframe-field + .reframe-field { border-top: 1px solid var(--border); }
+.rf-label { color: var(--muted); font-size: 12px; }
+.rf-notes { margin: var(--s3) 0 0; padding-left: var(--s5); font-size: 12.5px; color: var(--muted); }
+.rf-notes li + li { margin-top: 3px; }

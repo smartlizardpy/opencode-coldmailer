@@ -26,7 +26,8 @@ export type LlmTask =
   | "interview.next_question" | "interview.extract_product"
   | "search.queries" | "discover.search" | "company.judge" | "company.enrich"
   | "contact.extract"
-  | "email.draft" | "email.revise" | "reply.classify" | "reply.draft";
+  | "email.draft" | "email.revise" | "reply.classify" | "reply.draft"
+  | "campaign.reframe";
 
 /** Which lane and tool policy each task runs under. Central so no caller can get it wrong. */
 const TASK_CONFIG: Record<LlmTask, { slot: Slot; policy: ToolPolicy; kind: "extract" | "write" }> = {
@@ -43,6 +44,9 @@ const TASK_CONFIG: Record<LlmTask, { slot: Slot; policy: ToolPolicy; kind: "extr
   "email.revise":             { slot: "writing",  policy: "none",     kind: "write" },
   "reply.classify":           { slot: "writing",  policy: "none",     kind: "extract" },
   "reply.draft":              { slot: "writing",  policy: "none",     kind: "write" },
+  // Rewriting a person's own rough notes into two usable fields. Interactive by default -
+  // they are sitting in front of the dialog waiting for it.
+  "campaign.reframe":         { slot: "writing",  policy: "none",     kind: "write" },
 };
 
 export interface LlmRequest {

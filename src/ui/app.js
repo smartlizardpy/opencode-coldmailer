@@ -164,21 +164,35 @@ function renderCrumb() {
 }
 
 /* ───────────────────────────────────────────────────────── theme */
+/* Light by default rather than following the OS. This is a tool for reading and editing text
+   all day, and the person it was built for asked for light. The toggle still cycles
+   light -> dark -> system, and whatever is picked is remembered. */
+const DEFAULT_THEME = "light";
 
-function applyTheme(mode) {
+
+/**
+ * `persist` is the whole point of this signature.
+ *
+ * Boot used to save whatever it applied, so the old default of "system" got written to storage
+ * on the first ever page load - as if it had been chosen. Changing the default then had no
+ * effect on anyone who had already opened the app once, because their storage said "system"
+ * and the code could not tell that apart from a real preference. Only an actual click writes.
+ */
+function applyTheme(mode, persist = false) {
   if (mode === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", mode);
-  try { localStorage.setItem("cc-theme", mode); } catch { /* private mode */ }
+  if (persist) { try { localStorage.setItem("cc-theme", mode); } catch { /* private mode */ } }
   const cur = mode === "system"
     ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : mode;
   $("#themeBtn").innerHTML = `<svg aria-hidden="true"><use href="#i-${cur === "dark" ? "sun-light" : "half-moon"}"/></svg>`;
   $("#themeBtn").title = `Theme: ${mode}`;
 }
 function cycleTheme() {
-  let cur = "system";
-  try { cur = localStorage.getItem("cc-theme") || "system"; } catch { /* ignore */ }
-  applyTheme({ system: "light", light: "dark", dark: "system" }[cur]);
-  toast(`Theme: ${{ system: "light", light: "dark", dark: "system" }[cur]}`);
+  let cur = DEFAULT_THEME;
+  try { cur = localStorage.getItem("cc-theme") || DEFAULT_THEME; } catch { /* ignore */ }
+  const next = { system: "light", light: "dark", dark: "system" }[cur] ?? "light";
+  applyTheme(next, true);
+  toast(`Theme: ${next}`);
 }
 
 /* ───────────────────────────────────────────────────────── command palette */
@@ -1619,16 +1633,17 @@ async function renderDeliverability(refresh = false) {
 /* ───────────────────────────────────────────────────────── dialogs */
 
 function modal(title, bodyHtml, onConfirm, confirmLabel = "Save") {
+  // Title and buttons stay put; only the fields scroll. A dialog taller than the window used to
+  // run off the bottom of the screen with nothing to scroll - .scrim is position:fixed and
+  // .palette is overflow:hidden - so the Create button was simply unreachable on a short screen.
   $("#modal").innerHTML = `
     <div class="scrim" id="scrim">
-      <div class="palette" role="dialog" aria-modal="true" aria-label="${esc(title)}" style="width:min(620px,94vw)">
-        <div style="padding:var(--s5)">
-          <h2 style="margin-bottom:var(--s4);font-family:var(--display);font-size:16px">${esc(title)}</h2>
-          <div id="modalBody">${bodyHtml}</div>
-          <div class="row" style="margin-top:var(--s5);justify-content:flex-end">
-            <button class="btn ghost" id="mCancel">Cancel</button>
-            <button class="btn" id="mOk">${esc(confirmLabel)}</button>
-          </div>
+      <div class="palette dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+        <h2 class="dialog-head">${esc(title)}</h2>
+        <div id="modalBody" class="dialog-body">${bodyHtml}</div>
+        <div class="dialog-foot">
+          <button class="btn ghost" id="mCancel">Cancel</button>
+          <button class="btn" id="mOk">${esc(confirmLabel)}</button>
         </div>
       </div>
     </div>`;
@@ -1655,6 +1670,12 @@ function newCampaignDialog() {
     <p class="card-note" style="margin-top:var(--s2)">Be specific about the <b>kind</b> of
       organisation. This is what discovery filters on, and it's how a search for news sites
       avoids coming back full of sports clubs.</p>
+    <div class="row" style="margin-top:var(--s3)">
+      <button type="button" class="btn ghost sm" id="btnReframe">${icon("sparks")} Tidy this up</button>
+      <span class="card-note" style="margin:0">Write it however it comes out — mixed languages,
+        half a sentence. This rewrites it into the two fields the search actually uses.</span>
+    </div>
+    <div id="reframeOut"></div>
     <div class="grid2" style="margin-top:var(--s4)">
       <label class="field">How to find them<select id="cMode">
         <option value="opencode_search">Search the web (free)</option>
@@ -1672,6 +1693,52 @@ function newCampaignDialog() {
       });
       S.campaign = c.id; toast("Campaign created"); go("campaigns");
     }, "Create");
+
+  wireReframe();
+}
+
+/**
+ * Rewrite rough notes into the two fields discovery actually uses.
+ *
+ * Nothing is applied automatically. The suggestion is shown next to what you wrote, with the
+ * tool's own account of what it changed and what it refused to guess, and you press Use it.
+ * A rewrite you did not read is how a campaign ends up aimed at something you never chose.
+ */
+function wireReframe() {
+  const btn = $("#btnReframe"), out = $("#reframeOut");
+  if (!btn || !out) return;
+  btn.onclick = async () => {
+    const payload = {
+      name: $("#cName").value, goal: $("#cGoal").value, target: $("#cTarget").value,
+    };
+    if (!`${payload.name}${payload.goal}${payload.target}`.trim()) {
+      return toast("Write something first, however rough", true);
+    }
+    btn.disabled = true;
+    out.innerHTML = `<div class="card-note" style="margin-top:var(--s3)"><span class="spinner"></span> Rewriting…</div>`;
+    try {
+      const r = await api("/api/campaigns/reframe", payload);
+      out.innerHTML = `
+        <div class="reframe">
+          <div class="reframe-field"><span class="rf-label">Name</span><span>${esc(r.name)}</span></div>
+          <div class="reframe-field"><span class="rf-label">Goal</span><span>${esc(r.goal)}</span></div>
+          <div class="reframe-field"><span class="rf-label">Looking for</span><span>${esc(r.target_description)}</span></div>
+          ${r.notes?.length ? `<ul class="rf-notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+          <div class="row" style="margin-top:var(--s3)">
+            <button type="button" class="btn sm" id="rfUse">Use it</button>
+            <button type="button" class="btn ghost sm" id="rfDrop">Keep mine</button>
+          </div>
+        </div>`;
+      $("#rfUse").onclick = () => {
+        if (r.name) $("#cName").value = r.name;
+        if (r.goal) $("#cGoal").value = r.goal;
+        if (r.target_description) $("#cTarget").value = r.target_description;
+        out.innerHTML = `<div class="card-note" style="margin-top:var(--s3)">Applied — edit anything that is not right.</div>`;
+      };
+      $("#rfDrop").onclick = () => { out.innerHTML = ""; };
+    } catch (e) { fail(e); out.innerHTML = ""; }
+    finally { btn.disabled = false; }
+  };
 }
 
 function campaignSettingsDialog(camp) {
@@ -1902,8 +1969,14 @@ async function boot() {
   // Load the icon sprite before first paint so nothing flashes an empty box.
   try { $("#sprite").innerHTML = await (await fetch("/icons.svg")).text(); } catch { /* icons degrade to blanks */ }
 
-  let theme = "system", collapsed = "0";
-  try { theme = localStorage.getItem("cc-theme") || "system"; collapsed = localStorage.getItem("cc-collapsed") || "0"; } catch { /* ignore */ }
+  let theme = DEFAULT_THEME, collapsed = "0";
+  try {
+    const stored = localStorage.getItem("cc-theme");
+    // Same reasoning as the inline script in index.html: a stored "system" predates this
+    // default and was written by the app, not chosen by anyone.
+    if (stored && stored !== "system") theme = stored;
+    collapsed = localStorage.getItem("cc-collapsed") || "0";
+  } catch { /* ignore */ }
   applyTheme(theme);
   $("#app").dataset.collapsed = collapsed;
   $("#kbdHint").textContent = isMac ? "⌘K" : "Ctrl K";
