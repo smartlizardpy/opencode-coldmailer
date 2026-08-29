@@ -44,6 +44,8 @@ const dt = (ts) => ts ? new Intl.DateTimeFormat(undefined,
 
 const S = {
   route: "dashboard", campaign: null, health: null, stats: null,
+  // When run:progress last wrote to the job bar, so the health poll does not overwrite it.
+  lastProgressAt: 0,
   campaigns: [], companies: [], drafts: [], replies: [], product: null,
   reviewIndex: 0, filter: "", companyFilter: "all", draftFilter: "needs_review",
   selection: new Set(), loading: false,
@@ -1680,7 +1682,11 @@ async function loadHealth() {
 
     const jobs = h.jobs ?? [];
     $("#jobbar").classList.toggle("hidden", jobs.length === 0);
-    if (jobs.length) $("#jobText").textContent = jobs.map((j) => j.label).join(" · ");
+    // The health poll knows only the job's name; run:progress knows which step it is on. This
+    // poll runs every 6 seconds, so writing the bare label unconditionally wiped the detailed
+    // line each time and the bar flickered between "1/5 - searching..." and "Finding companies".
+    const detailed = Date.now() - S.lastProgressAt < 20_000;
+    if (jobs.length && !detailed) $("#jobText").textContent = jobs.map((j) => j.label).join(" · ");
 
     // Badges live on the nav, so keep the counts fresh without a full stats fetch.
     if (!S.stats) S.stats = {};
@@ -1700,7 +1706,10 @@ function connectEvents() {
     const d = JSON.parse(e.data);
     bar.classList.remove("hidden"); $("#jobText").textContent = d.label; prog.classList.add("hidden");
   });
-  ev.addEventListener("job:end", () => { bar.classList.add("hidden"); prog.classList.add("hidden"); loadHealth(); });
+  ev.addEventListener("job:end", () => {
+    S.lastProgressAt = 0;
+    bar.classList.add("hidden"); prog.classList.add("hidden"); loadHealth();
+  });
   ev.addEventListener("job:error", (e) => {
     const d = JSON.parse(e.data);
     toast(`${d.label}: ${d.error}`, true);
@@ -1724,6 +1733,7 @@ function connectEvents() {
   });
   ev.addEventListener("run:progress", (e) => {
     const d = JSON.parse(e.data);
+    S.lastProgressAt = Date.now();
     bar.classList.remove("hidden");
     $("#jobText").textContent = `${d.index}/${d.total} · ${d.company ?? ""} — ${d.stage}`;
     prog.classList.remove("hidden");
