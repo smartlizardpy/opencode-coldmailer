@@ -253,13 +253,59 @@ export async function sendOne(db: Db, draftId: string, smtp: SmtpConfig): Promis
  * next tick - a greylisted address would be retried roughly once a second, forever, which is
  * both useless and the fastest way to be treated as an attacker.
  */
-export function nextApprovedDraftId(db: Db, campaignId?: string): string | undefined {
-  const where = "status='approved' AND (scheduled_for IS NULL OR scheduled_for <= ?)";
-  const row = (campaignId
-    ? db.prepare(`SELECT id FROM email_draft WHERE ${where} AND campaign_id=? ORDER BY approved_at LIMIT 1`).get(Date.now(), campaignId)
-    : db.prepare(`SELECT id FROM email_draft WHERE ${where} ORDER BY approved_at LIMIT 1`).get(Date.now())
-  ) as { id: string } | undefined;
+/**
+ * Pick the next draft to send, spreading sends across organisations.
+ *
+ * Three people at the same publisher, sent 60-180s apart, arrive as a blast: the recipients
+ * talk to each other, and the receiving mail server sees three near-identical cold emails to
+ * one domain inside ten minutes. Both are bad, and the plain "oldest approved first" ordering
+ * produced exactly that, because drafts are approved a company at a time.
+ *
+ * So: never send to a company contacted within `gapMs`, and among what is left prefer the
+ * company that has been left alone the longest. A company never contacted sorts first.
+ */
+export function nextApprovedDraftId(
+  db: Db, campaignId?: string, opts: { gapMs?: number; nowMs?: number } = {},
+): string | undefined {
+  const nowMs = opts.nowMs ?? Date.now();
+  const gapMs = opts.gapMs ?? 4 * 3600_000;
+  const cutoff = nowMs - gapMs;
+
+  // last_sent is per COMPANY, not per campaign: two campaigns hitting the same organisation on
+  // the same afternoon is the same problem wearing a different hat.
+  const sql = `
+    SELECT d.id,
+           (SELECT MAX(s.sent_at) FROM send_log s
+              JOIN email_draft d2 ON d2.id = s.draft_id
+              JOIN campaign_company cc2 ON cc2.id = d2.campaign_company_id
+             WHERE cc2.company_id = cc.company_id AND s.status='sent') AS last_sent
+      FROM email_draft d
+      JOIN campaign_company cc ON cc.id = d.campaign_company_id
+     WHERE d.status='approved'
+       AND (d.scheduled_for IS NULL OR d.scheduled_for <= ?)
+       ${campaignId ? "AND d.campaign_id = ?" : ""}
+       AND (last_sent IS NULL OR last_sent <= ?)
+     ORDER BY last_sent IS NOT NULL, last_sent ASC, d.approved_at ASC
+     LIMIT 1`;
+  const args: unknown[] = campaignId ? [nowMs, campaignId, cutoff] : [nowMs, cutoff];
+  const row = db.prepare(sql).get(...(args as [])) as { id: string } | undefined;
   return row?.id;
+}
+
+/** Approved drafts held back only because their company was contacted too recently. */
+export function heldForCompanyGap(db: Db, opts: { gapMs?: number; nowMs?: number } = {}): number {
+  const nowMs = opts.nowMs ?? Date.now();
+  const cutoff = nowMs - (opts.gapMs ?? 4 * 3600_000);
+  const row = db.prepare(`
+    SELECT COUNT(*) c FROM email_draft d
+      JOIN campaign_company cc ON cc.id = d.campaign_company_id
+     WHERE d.status='approved'
+       AND (d.scheduled_for IS NULL OR d.scheduled_for <= ?)
+       AND (SELECT MAX(s.sent_at) FROM send_log s
+              JOIN email_draft d2 ON d2.id = s.draft_id
+              JOIN campaign_company cc2 ON cc2.id = d2.campaign_company_id
+             WHERE cc2.company_id = cc.company_id AND s.status='sent') > ?`).get(nowMs, cutoff) as { c: number };
+  return row.c;
 }
 
 /** How long to wait before trying a temporarily-failed send again. */
@@ -273,6 +319,13 @@ export function temporaryFailures(db: Db, draftId: string): number {
   return Number((db.prepare(
     "SELECT COUNT(*) c FROM send_log WHERE draft_id=? AND error_code='SMTP_TEMPORARY'",
   ).get(draftId) as { c: number }).c);
+}
+
+/** How long to leave a company alone after emailing someone there. */
+export function companyGapMs(db: Db): number {
+  const s = getSetting<SendingSettings>(db, "sending", {} as SendingSettings);
+  const hours = Number((s as { companyGapHours?: number }).companyGapHours ?? 4);
+  return Math.max(0, hours) * 3600_000;
 }
 
 export function randomGapMs(db: Db): number {
@@ -327,8 +380,17 @@ export class SendRunner {
         const wait = g.windowOpensAt ? Math.max(30_000, g.windowOpensAt - Date.now() + 60_000) : 15 * 60_000;
         return this.schedule(Math.min(wait, 60 * 60_000));
       }
-      const id = nextApprovedDraftId(this.db);
-      if (!id) { this.lastOutcome = "nothing approved"; return this.schedule(20_000); }
+      const gapMs = companyGapMs(this.db);
+      const id = nextApprovedDraftId(this.db, undefined, { gapMs });
+      if (!id) {
+        // Distinguish "there is nothing to send" from "everything left is waiting on the
+        // per-company gap" - they need different reactions from the person watching.
+        const held = heldForCompanyGap(this.db, { gapMs });
+        this.lastOutcome = held
+          ? `${held} waiting — already emailed someone at that company recently`
+          : "nothing approved";
+        return this.schedule(held ? 5 * 60_000 : 20_000);
+      }
       const cfg = this.smtp();
       if (!cfg) { this.lastOutcome = "SMTP not configured"; return this.schedule(60_000); }
 

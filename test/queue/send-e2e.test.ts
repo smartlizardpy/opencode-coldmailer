@@ -210,8 +210,10 @@ test("the runner drains the queue one at a time and then goes quiet", async () =
   await withSink(async (sink) => {
     const { db, ids } = world();
     await setSecret(db, "smtp.password", "pw");
-    // A gap of zero, because the point here is the ordering and the stopping, not the pacing.
-    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0 });
+    // Gaps of zero, because the point here is the ordering and the stopping, not the pacing.
+    // companyGapHours included: all three contacts are at one company, which the per-company
+    // spacing would otherwise hold back on purpose. That behaviour has its own tests.
+    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0, companyGapHours: 0 });
 
     for (const local of ["a", "b", "c"]) {
       const ct = ulid();

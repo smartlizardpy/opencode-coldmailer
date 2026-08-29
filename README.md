@@ -160,6 +160,22 @@ its own when the window opens. The Outbox says which window is in force and how 
 
 Off by default, so a first send while you are testing is not silently refused because it is Sunday.
 
+### Not three at once
+
+Drafts are approved a company at a time, so plain oldest-first sending puts three people at one
+publisher into the queue back to back. Sixty to a hundred and eighty seconds apart, that arrives
+as a blast: the recipients compare notes, and the receiving server sees three near-identical
+cold emails to one domain inside ten minutes.
+
+So a company is left alone for four hours after anyone there is emailed, and among what is
+eligible the queue prefers whichever organisation has been left alone longest — a company never
+contacted always goes first. The gap spans campaigns, because two campaigns reaching the same
+organisation on the same afternoon is the same problem wearing a different hat. A *failed* send
+does not start the clock: nothing arrived.
+
+Set it to zero in Settings to send back to back. That turns off the waiting, not the
+preference — given a choice, an untouched company still goes first.
+
 ## Bounces
 
 A bounce arrives in the same mailbox as a reply and matches the same thread. Until it was sorted

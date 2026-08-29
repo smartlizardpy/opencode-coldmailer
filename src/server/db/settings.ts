@@ -5,6 +5,12 @@ import { DEFAULT_WINDOW, type SendWindow } from "../queue/window.ts";
 export interface SendingSettings {
   dailyLimit: number;
   minGapSeconds: number;
+  /**
+   * Hours to leave a company alone after emailing someone there. Three people at one publisher
+   * sent minutes apart arrive as a blast - the recipients compare notes, and the receiving
+   * server sees three near-identical cold emails to one domain inside ten minutes.
+   */
+  companyGapHours: number;
   maxGapSeconds: number;
   /**
    * Opt-out + identity footer. Default OFF, per explicit user instruction.
@@ -23,6 +29,7 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   sending: {
     dailyLimit: 30,
     minGapSeconds: 60,
+    companyGapHours: 4,
     maxGapSeconds: 180,
     footerEnabled: false,
     footerText: "",

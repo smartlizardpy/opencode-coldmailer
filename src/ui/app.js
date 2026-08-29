@@ -1373,6 +1373,8 @@ async function renderSettings() {
         <label class="field">Max per day<input id="dailyLimit" type="number" min="1" value="${esc(g.dailyLimit ?? 30)}"></label>
         <label class="field">Min gap (seconds)<input id="minGap" type="number" min="10" value="${esc(g.minGapSeconds ?? 60)}"></label>
         <label class="field">Max gap (seconds)<input id="maxGap" type="number" min="10" value="${esc(g.maxGapSeconds ?? 180)}"></label>
+        <label class="field">Leave a company alone for (hours)
+          <input id="companyGap" type="number" min="0" value="${esc(g.companyGapHours ?? 4)}"></label>
       </div>
       <label class="check" style="margin-top:var(--s4)">
         <input type="checkbox" id="footerEnabled" ${g.footerEnabled ? "checked" : ""}>
@@ -1467,7 +1469,8 @@ async function renderSettings() {
     try {
       await api("/api/settings", { sending: {
         dailyLimit: +$("#dailyLimit").value, minGapSeconds: +$("#minGap").value,
-        maxGapSeconds: +$("#maxGap").value, footerEnabled: $("#footerEnabled").checked,
+        maxGapSeconds: +$("#maxGap").value, companyGapHours: +$("#companyGap").value,
+        footerEnabled: $("#footerEnabled").checked,
         footerText: $("#footerText").value,
       } });
       toast("Saved");
