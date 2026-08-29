@@ -467,3 +467,15 @@ details[open] summary::before{transform:rotate(90deg)}
   margin: 0; font-size: 13px; }
 .verdict-kinds dt { color: var(--muted); }
 .verdict-kinds dd { margin: 0; font-weight: 500; }
+
+/* Rejection summary. Quiet by default; it only raises its voice when the gate is throwing
+   away most of what the search found, which is a targeting problem worth interrupting for. */
+.reject-summary { margin-top: var(--s4); padding: var(--s4); border-radius: var(--r);
+  border: 1px solid var(--border); background: var(--surface); }
+.reject-summary.loud { border-color: var(--warn); background: var(--warn-bg); }
+.rs-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  flex-wrap: wrap; font-size: 14px; }
+.rs-kinds { list-style: none; margin: var(--s3) 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); font-size: 13px; color: var(--muted); }
+.rs-kinds li { display: flex; align-items: baseline; gap: var(--s2); }
+.rs-n { color: var(--text); font-weight: 500; }

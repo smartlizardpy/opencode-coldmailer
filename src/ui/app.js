@@ -489,6 +489,34 @@ async function renderDashboard() {
 
 /* ───────────────────────────────────────────────────────── campaigns */
 
+/**
+ * Group the gate's rejections into something readable at a glance.
+ *
+ * A campaign that rejects most of what it finds is a targeting problem, not a quiet success,
+ * and until this existed the only way to notice was to switch to the Rejected filter and read
+ * the rows one by one. Showing the KINDS it rejected is what makes a mis-aimed campaign
+ * obvious immediately - "23 rejected, mostly tennis academies" says what a count cannot.
+ */
+function rejectionSummary(companies) {
+  const rejected = companies.filter((r) => r.status === "rejected");
+  if (rejected.length === 0) return null;
+  const kinds = new Map();
+  let belowFloor = 0;
+  for (const r of rejected) {
+    const reason = r.rejected_reason ?? "";
+    const m = /this is (?:an?|the) (.+)$/i.exec(reason);
+    if (m) kinds.set(m[1].trim(), (kinds.get(m[1].trim()) ?? 0) + 1);
+    else if (/below this campaign's floor/i.test(reason)) belowFloor++;
+    else kinds.set("unclear", (kinds.get("unclear") ?? 0) + 1);
+  }
+  return {
+    total: rejected.length,
+    belowFloor,
+    kinds: [...kinds.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
+    overridden: companies.filter((r) => r.gate_override).length,
+  };
+}
+
 async function renderCampaigns() {
   S.campaigns = await api("/api/campaigns");
   if (!S.campaign && S.campaigns.length) S.campaign = S.campaigns[0].id;
@@ -528,6 +556,24 @@ async function renderCampaigns() {
       ${camp.goal ? `<div class="card-note"><b>Ask:</b> ${esc(camp.goal)}</div>` : ""}
       ${camp.target_description ? `<div class="card-note"><b>Looking for:</b> ${esc(camp.target_description)}</div>`
         : `<div class="card-note" style="color:var(--warn)">No target set — discovery will fall back to your product's own customer profile, which is usually not who you want for a partner or press campaign.</div>`}
+      ${(() => {
+        const rj = rejectionSummary(S.companies);
+        if (!rj) return "";
+        const share = Math.round((rj.total / Math.max(1, S.companies.length)) * 100);
+        return `<div class="reject-summary${share >= 60 ? " loud" : ""}">
+          <div class="rs-head">
+            <b>${num(rj.total)} of ${num(S.companies.length)} rejected by the targeting gate</b>
+            <button class="btn ghost sm" id="btnSeeRejected">See them</button>
+          </div>
+          ${rj.kinds.length ? `<ul class="rs-kinds">${rj.kinds.map(([k, n]) =>
+            `<li><span class="rs-n mono">${num(n)}</span> ${esc(k)}</li>`).join("")}</ul>` : ""}
+          ${rj.belowFloor ? `<div class="card-note">${num(rj.belowFloor)} were the right kind but scored below this campaign's fit floor.</div>` : ""}
+          ${rj.overridden ? `<div class="card-note">${num(rj.overridden)} overruled by you.</div>` : ""}
+          ${share >= 60 ? `<div class="card-note">Most of what the search found was not the right kind of
+            organisation. That usually means the target needs to name the kind more plainly — check one
+            site above to see how the gate is reading it.</div>` : ""}
+        </div>`;
+      })()}
     </div>
 
     <div class="card">
@@ -633,6 +679,11 @@ async function renderCampaigns() {
   $("#btnDiscover").onclick = async () => {
     try { await api(`/api/campaigns/${camp.id}/discover`, { extra: $("#extraTargeting").value }); toast("Searching the web…"); }
     catch (e) { fail(e); }
+  };
+  const seeRejected = $("#btnSeeRejected");
+  if (seeRejected) seeRejected.onclick = () => {
+    S.companyFilter = "rejected";
+    renderCampaigns();
   };
   $("#btnTestTarget").onclick = async () => {
     const website = $("#testDomain").value.trim();
