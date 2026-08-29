@@ -291,7 +291,11 @@ export class SendRunner {
     if (!this.running) return;
     try {
       const g = sendGuards(this.db);
-      if (g.paused) { this.lastOutcome = "paused"; return this.schedule(30_000); }
+      // Pressing Pause in the UI stops the runner outright, so this branch is for the case
+      // where the setting changed underneath a running loop. Re-checked every few seconds
+      // rather than every thirty: it is one SQLite read, and half a minute of apparent
+      // nothing-happening after un-pausing looks like a bug whatever the cause.
+      if (g.paused) { this.lastOutcome = "paused"; return this.schedule(5_000); }
       if (g.remaining <= 0) { this.lastOutcome = `daily cap reached (${g.sentLast24h}/${g.dailyLimit})`; return this.schedule(15 * 60_000); }
       if (!g.windowOpen) {
         this.lastOutcome = `outside the sending window (${g.windowLabel})`;

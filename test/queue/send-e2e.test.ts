@@ -14,7 +14,7 @@ import { openDb, ulid, now, type Db } from "../../src/server/db/index.ts";
 import { migrate } from "../../src/server/db/migrate.ts";
 import { getSetting, seedDefaults, setSetting } from "../../src/server/db/settings.ts";
 import { setSecret } from "../../src/server/mail/secrets.ts";
-import { sendOne, suppress } from "../../src/server/queue/sendQueue.ts";
+import { SendRunner, sendOne, suppress } from "../../src/server/queue/sendQueue.ts";
 import { startSmtpSink, type SmtpSink } from "../fixtures/smtp-sink.ts";
 
 function world(): { db: Db; ids: Record<string, string> } {
@@ -193,4 +193,103 @@ test("a Turkish subject survives encoding intact", async () => {
     assert.equal(decoded, "haftalık spor haber akışı");
     assert.match(sink.messages[0].body(), /Ankara maçları/);
   });
+});
+
+/* The drain loop - what actually runs when you press "Start sending". */
+
+const settle = async (ms: number) => { await new Promise((r) => setTimeout(r, ms)); };
+
+/** Drive the runner until `done()` or the deadline, so a stall fails fast instead of hanging. */
+async function until(done: () => boolean, deadlineMs = 8000): Promise<boolean> {
+  const stop = Date.now() + deadlineMs;
+  while (Date.now() < stop) { if (done()) return true; await settle(50); }
+  return done();
+}
+
+test("the runner drains the queue one at a time and then goes quiet", async () => {
+  await withSink(async (sink) => {
+    const { db, ids } = world();
+    await setSecret(db, "smtp.password", "pw");
+    // A gap of zero, because the point here is the ordering and the stopping, not the pacing.
+    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0 });
+
+    for (const local of ["a", "b", "c"]) {
+      const ct = ulid();
+      db.prepare("INSERT INTO contact (id,company_id,email,source_url,source_kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+        .run(ct, ids.co, `${local}@haber.com.tr`, "https://haber.com.tr/kunye", "published", now(), now());
+      approvedDraft(db, { ...ids, ct });
+    }
+
+    const runner = new SendRunner(db, () => cfgFor(sink));
+    runner.start();
+    try {
+      assert.ok(await until(() => sink.messages.length === 3), `only sent ${sink.messages.length}`);
+      // Nothing approved is left, so it must stop sending rather than resend anything.
+      await settle(400);
+      assert.equal(sink.messages.length, 3);
+      assert.equal(new Set(sink.messages.map((m) => m.to[0])).size, 3, "three different people");
+    } finally { runner.stop(); }
+  });
+});
+
+test("pausing stops the runner before the next send, not after the queue empties", async () => {
+  await withSink(async (sink) => {
+    const { db, ids } = world();
+    await setSecret(db, "smtp.password", "pw");
+    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0, paused: true });
+    approvedDraft(db, ids);
+
+    const runner = new SendRunner(db, () => cfgFor(sink));
+    runner.start();
+    try {
+      await settle(900);
+      assert.equal(sink.messages.length, 0, "paused means paused");
+      assert.match(runner.lastOutcome ?? "", /paused/);
+
+      // Un-pausing is picked up on the next tick without restarting the runner. The UI does
+      // not rely on this - Pause stops the loop and Start starts it - but the setting is the
+      // thing the guard reads, so the two must not be able to disagree.
+      setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), paused: false });
+      assert.ok(await until(() => sink.messages.length === 1, 12_000), "did not resume after un-pausing");
+    } finally { runner.stop(); }
+  });
+});
+
+test("stopping the runner leaves nothing behind that could fire later", async () => {
+  await withSink(async (sink) => {
+    const { db, ids } = world();
+    await setSecret(db, "smtp.password", "pw");
+    setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0 });
+    approvedDraft(db, ids);
+
+    const runner = new SendRunner(db, () => cfgFor(sink));
+    runner.start();
+    runner.stop();
+    await settle(700);
+
+    assert.equal(runner.isRunning, false);
+    assert.equal(runner.nextSendAt, undefined, "a pending timer would send after you stopped it");
+    assert.equal(sink.messages.length, 0);
+  });
+});
+
+test("the runner survives SMTP being unreachable and does not lose the draft", async () => {
+  const { db, ids } = world();
+  await setSecret(db, "smtp.password", "pw");
+  setSetting(db, "sending", { ...getSetting<any>(db, "sending", {}), minGapSeconds: 0, maxGapSeconds: 0 });
+  const draftId = approvedDraft(db, ids);
+
+  // Port 1 refuses immediately: a mailbox that is down, not a message that is wrong.
+  const runner = new SendRunner(db, () => ({
+    host: "127.0.0.1", port: 1, secure: false,
+    user: "ozan@sahafeed.com", fromEmail: "ozan@sahafeed.com", fromName: "Ozan",
+  }));
+  runner.start();
+  try {
+    await settle(1200);
+    assert.ok((runner.lastOutcome ?? "").length > 0, "the runner should say what happened");
+    // The draft must still be sendable once the mailbox comes back.
+    const status = (db.prepare("SELECT status FROM email_draft WHERE id=?").get(draftId) as any).status;
+    assert.ok(status === "approved" || status === "sent", `unexpected status ${status}`);
+  } finally { runner.stop(); }
 });
