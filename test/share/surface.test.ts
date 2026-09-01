@@ -61,13 +61,14 @@ interface Reply { status: number; body: string; json: () => any }
  * node:http rather than fetch, because `Host` is a forbidden header there and undici silently
  * rewrites it - which would make every one of these tests pass by testing the loopback twice.
  */
-function call(path: string, opts: { host?: string; cookie?: string; method?: string; origin?: string } = {}): Promise<Reply> {
+function call(path: string, opts: { host?: string; cookie?: string; method?: string; origin?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const method = opts.method ?? "GET";
-    const headers: Record<string, string> = { host: opts.host ?? "127.0.0.1" };
+    const payload = JSON.stringify(opts.body ?? {});
+    const headers: Record<string, string> = { host: opts.host ?? "127.0.0.1", ...(opts.headers ?? {}) };
     if (opts.cookie) headers.cookie = opts.cookie;
     if (opts.origin) headers.origin = opts.origin;
-    if (method === "POST") { headers["content-type"] = "application/json"; headers["content-length"] = "2"; }
+    if (method === "POST") { headers["content-type"] = "application/json"; headers["content-length"] = String(Buffer.byteLength(payload)); }
 
     const req = request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
       let body = "";
@@ -84,7 +85,7 @@ function call(path: string, opts: { host?: string; cookie?: string; method?: str
       }
     });
     req.on("error", reject);
-    if (method === "POST") req.write("{}");
+    if (method === "POST") req.write(payload);
     req.end();
   });
 }
@@ -180,6 +181,40 @@ test("a same-origin POST from the shared page is allowed", async () => {
   assert.equal(r.status, 200);
 });
 
+test("tab control requires consent and stays on the targeted shared tab", async () => {
+  const cookie = joinAsTeammate();
+  const session = db.prepare("SELECT id FROM share_session ORDER BY id DESC LIMIT 1").get() as { id: string };
+  const target = { sessionId: session.id, tabId: "tab-control" };
+  const requested = await call("/api/share/control/request", { method: "POST", body: target });
+  assert.equal(requested.status, 200);
+  assert.equal(requested.json().control.status, "requested");
+
+  const before = await call("/api/share/control/command", {
+    method: "POST", body: { ...target, command: { type: "click", controlId: "approve-draft" } },
+  });
+  assert.equal(before.status, 409, "the owner cannot command a tab before consent");
+
+  const granted = await call("/api/share/control/grant", {
+    host: TUNNEL, cookie, method: "POST", origin: `https://${TUNNEL}`, body: target,
+  });
+  assert.equal(granted.status, 200);
+  assert.equal(granted.json().control.status, "active");
+
+  const command = await call("/api/share/control/command", {
+    method: "POST", body: { ...target, command: { type: "click", controlId: "approve-draft" } },
+  });
+  assert.equal(command.status, 200);
+  assert.ok(command.json().commandId);
+
+  const wrongTab = await call("/api/share/control/command", {
+    method: "POST", body: { ...target, tabId: "other-tab", command: { type: "click", controlId: "approve-draft" } },
+  });
+  assert.equal(wrongTab.status, 409, "control cannot jump to another tab");
+
+  const released = await call("/api/share/control/release", { method: "POST", body: target });
+  assert.equal(released.status, 200);
+});
+
 test("the event stream needs a session too", async () => {
   assert.equal((await call("/api/events", { host: TUNNEL })).status, 401);
 });
@@ -213,6 +248,22 @@ test("a state change over the shared link leaves a row; a read does not", () => 
     assert.ok(!rows.some((r) => r.path === "/api/campaigns" && r.method === "GET" && r.ok === 1),
       "reading the campaign list is not an event anyone needs a record of");
   })();
+});
+
+test("a shared action can point back to the replay moment around it", async () => {
+  const cookie = joinAsTeammate();
+  const replay = (await call("/api/share/replay", {
+    host: TUNNEL, cookie, method: "POST", origin: `https://${TUNNEL}`,
+    body: { tabId: "tab-a", events: [{ type: "click", x: .4, y: .5 }] },
+  })).json();
+  await call("/api/send/pause", {
+    host: TUNNEL, cookie, method: "POST", origin: `https://${TUNNEL}`,
+    headers: { "x-coldcall-replay": replay.replaySessionId, "x-coldcall-replay-seq": String(replay.seq) },
+  });
+  const row = db.prepare("SELECT * FROM share_audit ORDER BY id DESC LIMIT 1").get() as any;
+  assert.equal(row.action, "Paused sending");
+  assert.equal(row.replay_session_id, replay.replaySessionId);
+  assert.equal(row.replay_seq, 1);
 });
 
 test("reaching for an owner-only endpoint is recorded as refused", async () => {

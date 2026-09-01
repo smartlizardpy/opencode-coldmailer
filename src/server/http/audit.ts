@@ -21,6 +21,7 @@ export interface AuditRow {
   id: string; session_id: string | null; label: string; method: string; path: string;
   action: string; detail: string; subject_type: string | null; subject_id: string | null;
   status: number; ok: number; created_at: number;
+  replay_session_id?: string | null; replay_seq?: number | null;
 }
 
 interface Rule {
@@ -160,6 +161,10 @@ const RULES: Rule[] = [
 
   rule("POST", "/api/share/redeem", () => ({ action: "Joined with an invite" })),
   rule("POST", "/api/share/leave", () => ({ action: "Signed out" })),
+  rule("POST", "/api/share/control/request", () => ({ action: "Requested control of a shared tab" })),
+  rule("POST", "/api/share/control/grant", () => ({ action: "Allowed owner control" })),
+  rule("POST", "/api/share/control/deny", () => ({ action: "Declined owner control" })),
+  rule("POST", "/api/share/control/release", () => ({ action: "Stopped shared-tab control" })),
 ];
 
 /** The sentence for a request, or undefined when it is not worth a row. */
@@ -182,16 +187,18 @@ export function describeAction(
 export function recordAudit(db: Db, entry: {
   sessionId: string | null; label: string; method: string; path: string;
   action: string; detail: string; subject?: [string, string]; status: number;
+  replay?: { replaySessionId: string; replaySeq: number | null };
 }): AuditRow | undefined {
   try {
     const id = ulid();
     db.prepare(
-      `INSERT INTO share_audit (id,session_id,label,method,path,action,detail,subject_type,subject_id,status,ok,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO share_audit (id,session_id,label,method,path,action,detail,subject_type,subject_id,status,ok,created_at,replay_session_id,replay_seq)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(id, entry.sessionId, entry.label.slice(0, 80), entry.method, entry.path.slice(0, 200),
           entry.action.slice(0, 200), entry.detail.slice(0, 200),
           entry.subject?.[0] ?? null, entry.subject?.[1] ?? null,
-          entry.status, entry.status < 400 ? 1 : 0, now());
+          entry.status, entry.status < 400 ? 1 : 0, now(),
+          entry.replay?.replaySessionId ?? null, entry.replay?.replaySeq ?? null);
     return db.prepare("SELECT * FROM share_audit WHERE id=?").get(id) as AuditRow;
   } catch {
     // An audit row failing must never fail the request it is describing. The action already

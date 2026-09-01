@@ -120,8 +120,10 @@ export function repairOrphans(db: Db): number {
       UPDATE source_page         SET company_id     = NULL WHERE company_id     IS NOT NULL AND company_id     NOT IN (SELECT id FROM company);
       UPDATE email_draft_version SET llm_call_id    = NULL WHERE llm_call_id    IS NOT NULL AND llm_call_id    NOT IN (SELECT id FROM llm_call);
       UPDATE email_draft         SET follows_send_id= NULL WHERE follows_send_id IS NOT NULL AND follows_send_id NOT IN (SELECT id FROM send_log);
-      UPDATE reply               SET llm_call_id    = NULL WHERE llm_call_id    IS NOT NULL AND llm_call_id    NOT IN (SELECT id FROM llm_call);
-      UPDATE share_audit         SET session_id     = NULL WHERE session_id     IS NOT NULL AND session_id     NOT IN (SELECT id FROM share_session);
+      UPDATE reply                SET llm_call_id       = NULL WHERE llm_call_id       IS NOT NULL AND llm_call_id       NOT IN (SELECT id FROM llm_call);
+      UPDATE share_audit          SET session_id        = NULL WHERE session_id        IS NOT NULL AND session_id        NOT IN (SELECT id FROM share_session);
+      UPDATE share_audit          SET replay_session_id = NULL WHERE replay_session_id IS NOT NULL AND replay_session_id NOT IN (SELECT id FROM share_replay_session);
+      UPDATE share_replay_session SET share_session_id  = NULL WHERE share_session_id  IS NOT NULL AND share_session_id  NOT IN (SELECT id FROM share_session);
     `);
 
     for (let pass = 0; pass < 6; pass++) {
@@ -149,7 +151,8 @@ export function repairOrphans(db: Db): number {
         DELETE FROM interview_turn WHERE product_id NOT IN (SELECT id FROM product);
         DELETE FROM sequence_step  WHERE campaign_id NOT IN (SELECT id FROM campaign);
         DELETE FROM tool_call_log  WHERE llm_call_id NOT IN (SELECT id FROM llm_call);
-        DELETE FROM share_session  WHERE invite_id IS NOT NULL AND invite_id NOT IN (SELECT id FROM share_invite);
+        DELETE FROM share_session      WHERE invite_id IS NOT NULL AND invite_id NOT IN (SELECT id FROM share_invite);
+        DELETE FROM share_replay_event WHERE replay_session_id NOT IN (SELECT id FROM share_replay_session);
       `);
       const now2 = count();
       if (now2 === 0 || now2 === start) break;

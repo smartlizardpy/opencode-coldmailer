@@ -62,6 +62,7 @@ test("the shared surface can do the whole outreach loop", () => {
     ["GET", "/api/replies"], ["POST", "/api/replies/01ABC/draft"],
     ["POST", "/api/campaigns/reframe"], ["POST", "/api/campaigns/suggest"],
     ["POST", "/api/campaigns/test-target"],
+    ["POST", "/api/share/replay"],
   ];
   for (const [m, p] of must) assert.equal(allows("sender", m, p), true, `${m} ${p} should be allowed`);
 });
@@ -204,7 +205,11 @@ test("cookie parsing picks the right name out of a crowded header", () => {
 
 /* --------------------------------------------------- campaign deletion gate */
 
-test("the audit feed and campaign deletion stay owner-only", () => {
+test("the audit feed, replay scrollback and campaign deletion stay owner-only", () => {
   assert.equal(allows("sender", "GET", "/api/share/activity"), false);
+  assert.equal(allows("sender", "GET", "/api/share/replays"), false);
+  assert.equal(allows("sender", "GET", "/api/share/replays/01ABC/events"), false);
+  assert.equal(allows("sender", "POST", "/api/share/control/request"), false);
+  assert.equal(allows("sender", "POST", "/api/share/control/command"), false);
   assert.equal(allows("sender", "POST", "/api/campaigns/01ABC/delete"), false);
 });

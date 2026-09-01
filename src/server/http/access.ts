@@ -110,6 +110,13 @@ const SENDER_SCOPES: Scope[] = [
   // The page reporting its own cursor/clicks/screen so the owner can watch live. Their own
   // activity, sent by their own page - and the response tells them they are being watched.
   scope("POST", "/api/share/presence"),
+  scope("POST", "/api/share/replay"),
+  scope("POST", "/api/share/control/grant"),
+  scope("POST", "/api/share/control/deny"),
+  scope("POST", "/api/share/control/heartbeat"),
+  scope("POST", "/api/share/control/poll"),
+  scope("POST", "/api/share/control/release"),
+  scope("POST", "/api/share/control/result"),
 ];
 
 /** Reachable over the tunnel with no session at all: the join screen and its assets. */

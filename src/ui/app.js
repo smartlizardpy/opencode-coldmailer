@@ -53,12 +53,23 @@ const S = {
   campaigns: [], companies: [], drafts: [], replies: [], product: null,
   reviewIndex: 0, filter: "", companyFilter: "all", draftFilter: "needs_review",
   selection: new Set(), loading: false,
+  replay: null, replayMap: {}, playback: null, controlMap: {},
 };
 
 async function api(path, body) {
-  const res = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  });
+  const headers = {};
+  const isReplayPost = path === "/api/share/replay" || path === "/api/share/presence";
+  if (body !== undefined) {
+    if (S.surface === "shared" && !isReplayPost) await flushSharedReplay(true);
+    headers["content-type"] = "application/json";
+  }
+  if (S.surface === "shared" && S.replay?.id && !isReplayPost) {
+    headers["x-coldcall-replay"] = S.replay.id;
+    if (S.replay.seq != null) headers["x-coldcall-replay-seq"] = String(S.replay.seq);
+  }
+  const res = await fetch(path, body === undefined
+    ? (Object.keys(headers).length ? { headers } : {})
+    : { method: "POST", headers, body: JSON.stringify(body) });
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = { error: text || `HTTP ${res.status}` }; }
   if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), json);
@@ -165,10 +176,14 @@ function go(route, opts = {}) {
   // surface has no business opening. Send it home rather than rendering a screen whose every
   // request will come back 403.
   if (!canOpen(route)) route = "dashboard";
-  // Leaving the Shared access screen stops the watch heartbeat, so the co-founder's "someone is
-  // watching" note goes out within a few seconds rather than lingering after you look away.
-  if (S.route === "shared" && route !== "shared") stopWatchHeartbeat();
+  // Leaving the Shared access screen stops the watch heartbeat, so the shared tab is no longer
+  // considered live-watched within a few seconds.
+  if (S.route === "shared" && route !== "shared") {
+    stopWatchHeartbeat();
+    releaseOwnerControls();
+  }
   S.route = route;
+  noteSharedRouteChange(route);
   S.selection.clear();
   if (opts.campaign) S.campaign = opts.campaign;
   history.replaceState(null, "", `#${route}${S.campaign ? `/${S.campaign}` : ""}`);
@@ -383,7 +398,8 @@ async function render() {
     "campaign-new": renderNewCampaign, shared: renderShared,
   }[S.route];
   c.innerHTML = page(skeleton());
-  try { await fn(); } catch (e) { fail(e); c.innerHTML = page(empty("warning-triangle", "Couldn't load this", e.message)); }
+  try { await fn(); markSharedSnapshotDirty(); }
+  catch (e) { fail(e); c.innerHTML = page(empty("warning-triangle", "Couldn't load this", e.message)); markSharedSnapshotDirty(); }
 }
 
 /* ───────────────────────────────────────────────────────── dashboard */
@@ -1444,70 +1460,469 @@ function shareCard(share) {
 }
 
 /**
- * Report this shared-surface tab's cursor, clicks and current screen so the owner can watch it
- * live. Runs only on the shared surface, only for a signed-in teammate.
+ * Report this shared-surface tab as a bounded co-browse stream. It is still only this coldcall
+ * page: the client can describe the DOM it owns, pointer/clicks inside the viewport, scroll
+ * positions, focus and the text entered into coldcall fields. It cannot see the desktop, browser
+ * chrome, another tab, or a different site.
  *
- * What it sends: where the pointer is (as a fraction of the window, so it renders at any size),
- * clicks, the current screen, and the LABEL of whatever field is focused. What it never sends:
- * the characters typed into that field. Watching a cursor move is co-browsing; capturing
- * keystrokes is a keylogger, and the line between them is that this function has nowhere to put
- * the text even if it wanted to.
- *
- * And it is not quiet: the response says whether anyone is watching, and when they are, a chip
- * says so. That is deliberate and not switch-off-able — a hidden version of this is the thing it
- * is written specifically not to be.
+ * This is disclosed on the shared tab's join screen. Recording stays limited to the shared
+ * coldcall surface and is visible later from Shared access. Passwords, tokens and secret-looking fields are structurally
+ * redacted before an event or snapshot is queued.
  */
+const SharedReplay = {
+  started: false, tabId: "", queue: [], snapshotDirty: false, lastSnapshotAt: 0, flushing: null,
+};
+const SharedControl = { state: null, heartbeat: null, poll: null, request: null, seenCommands: new Set() };
+const replayCssEscape = (s) => globalThis.CSS?.escape ? globalThis.CSS.escape(String(s)) : String(s).replace(/[^A-Za-z0-9_-]/g, "\\$&");
+const replayAttrEscape = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+const replayPoint = (e) => ({
+  x: Math.max(0, Math.min(1, e.clientX / Math.max(1, innerWidth))),
+  y: Math.max(0, Math.min(1, e.clientY / Math.max(1, innerHeight))),
+});
+
 function startPresenceReporting() {
-  let cursor = null, clicks = [], field = "", dirty = false;
+  if (SharedReplay.started) return;
+  SharedReplay.started = true;
+  SharedReplay.tabId = crypto.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
-  const fieldLabel = (el) => {
-    if (!el || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return "";
-    if (el.type === "password") return "a password field";      // never even name it beyond this
-    const lab = el.closest("label")?.textContent?.trim()
-      || el.getAttribute("aria-label")
-      || el.getAttribute("placeholder")
-      || el.id || "a field";
-    return String(lab).replace(/\s+/g, " ").slice(0, 50);
-  };
+  queueReplay("viewport", { w: innerWidth, h: innerHeight });
+  noteSharedRouteChange(S.route);
+  markSharedSnapshotDirty();
 
-  addEventListener("mousemove", throttle((e) => {
-    cursor = { x: e.clientX / innerWidth, y: e.clientY / innerHeight }; dirty = true;
-  }, 60), { passive: true });
+  addEventListener("mousemove", throttle((e) => queueReplay("pointer", replayPoint(e)), 60), { passive: true });
   addEventListener("click", (e) => {
-    clicks.push({ x: e.clientX / innerWidth, y: e.clientY / innerHeight }); dirty = true;
+    queueReplay("click", { ...replayPoint(e), button: e.button || 0 });
+    markSharedSnapshotDirty();
   }, true);
-  addEventListener("scroll", throttle(() => { dirty = true; }, 200), { passive: true, capture: true });
-  document.addEventListener("focusin", (e) => { field = fieldLabel(e.target); dirty = true; }, true);
-  document.addEventListener("focusout", () => { field = ""; dirty = true; }, true);
+  addEventListener("scroll", throttle((e) => queueReplay("scroll", replayScrollInfo(e.target)), 160), { passive: true, capture: true });
+  addEventListener("resize", throttle(() => {
+    queueReplay("viewport", { w: innerWidth, h: innerHeight });
+    markSharedSnapshotDirty();
+  }, 250), { passive: true });
 
-  const flush = async (force) => {
-    if (!dirty && !force) return;
-    dirty = false;
-    const batch = { route: S.route, cursor, viewport: { w: innerWidth, h: innerHeight }, field, clicks };
-    clicks = [];
-    try {
-      const r = await api("/api/share/presence", batch);
-      setWatchedChip(!!r.watched);
-    } catch { /* a dropped presence ping is nothing to bother anyone about */ }
-  };
-  // A quick cadence while something is changing, and a slow heartbeat so the "being watched"
-  // chip is still current when the co-founder is sitting still reading.
-  setInterval(() => flush(false), 150);
-  setInterval(() => flush(true), 2500);
+  document.addEventListener("focusin", (e) => {
+    const info = replayFieldInfo(e.target);
+    if (info) queueReplay("focus", info);
+  }, true);
+  document.addEventListener("focusout", (e) => {
+    const info = replayFieldInfo(e.target);
+    if (info) queueReplay("blur", { field: info.field, selector: info.selector, redacted: info.redacted });
+  }, true);
+  document.addEventListener("input", (e) => {
+    const info = replayFieldInfo(e.target);
+    if (!info) return;
+    queueReplay("input", { ...info, value: info.redacted ? "" : replayFieldValue(e.target) });
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.repeat || replayFieldInfo(e.target)) return; // text fields are captured by input events, with redaction.
+    queueReplay("key", { key: e.key, code: e.code, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey });
+  }, true);
+
+  const mo = new MutationObserver(throttle(() => markSharedSnapshotDirty(), 350));
+  [$("#app"), $("#modal"), $("#toast")].filter(Boolean).forEach((el) =>
+    mo.observe(el, { childList: true, subtree: true, attributes: true, characterData: true }));
+
+  setInterval(() => flushSharedReplay(false), 180);
+  setInterval(() => flushSharedReplay(true), 2500);
+  setTimeout(() => flushSharedReplay(true), 350);
+  addEventListener("pagehide", () => {
+    queueReplay("end", {});
+    flushSharedReplay(true, true);
+    const target = controlTargetFor();
+    if (target) fetch("/api/share/control/release", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(target), keepalive: true,
+    }).catch(() => {});
+  });
 }
 
-/** The disclosure. Present whenever the owner is actually watching this tab, and not dismissable. */
-function setWatchedChip(on) {
-  let chip = $("#watchChip");
-  if (!on) { chip?.remove(); return; }
-  if (chip) return;
-  chip = document.createElement("div");
-  chip.id = "watchChip";
-  chip.className = "watch-chip";
-  chip.innerHTML = `${icon("eye")} <span>The owner is watching this screen</span>`;
-  chip.title = "The person whose machine this runs on can see your cursor, clicks and which "
-    + "field you are in — live. They cannot see what you type into it.";
-  document.body.append(chip);
+function noteSharedRouteChange(route) {
+  if (S.surface !== "shared" || !SharedReplay.started) return;
+  queueReplay("route", { route });
+  queueReplay("viewport", { w: innerWidth, h: innerHeight });
+  markSharedSnapshotDirty();
+}
+function markSharedSnapshotDirty() {
+  if (S.surface === "shared" && SharedReplay.started) SharedReplay.snapshotDirty = true;
+}
+
+function queueReplay(type, data = {}) {
+  if (S.surface !== "shared" || !SharedReplay.started) return;
+  if (type === "snapshot") SharedReplay.queue = SharedReplay.queue.filter((e) => e.type !== "snapshot");
+  SharedReplay.queue.push({ type, at: Date.now(), route: S.route, ...data });
+  // A stalled network should not turn the shared tab into an unbounded in-memory recorder.
+  if (SharedReplay.queue.length > 600) SharedReplay.queue.splice(0, SharedReplay.queue.length - 600);
+}
+
+async function flushSharedReplay(force = false, keepalive = false) {
+  if (S.surface !== "shared" || !SharedReplay.started) return;
+  if (SharedReplay.flushing) {
+    if (!force) return SharedReplay.flushing;
+    try { await SharedReplay.flushing; } catch { /* try the forced flush below */ }
+  }
+
+  const n = Date.now();
+  if (!keepalive && SharedReplay.snapshotDirty && (force || n - SharedReplay.lastSnapshotAt > 1200)) {
+    const snap = captureReplaySnapshot();
+    if (snap) queueReplay("snapshot", snap);
+    SharedReplay.snapshotDirty = false;
+    SharedReplay.lastSnapshotAt = n;
+  }
+
+  if (!SharedReplay.queue.length && !force) return;
+  const events = SharedReplay.queue.splice(0, 120);
+  if (!events.length && !force) return;
+  const body = JSON.stringify({
+    tabId: SharedReplay.tabId,
+    replaySessionId: S.replay?.id,
+    route: S.route,
+    events,
+  });
+
+  SharedReplay.flushing = fetch("/api/share/replay", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+    keepalive,
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`replay ${res.status}`);
+    const r = await res.json();
+    S.replay = { id: r.replaySessionId, seq: r.seq };
+    if (r.control) handleSharedControlEvent({
+      action: r.control.status === "active" ? "active" : "request", control: r.control,
+    });
+  }).catch(() => {
+    // Replay is an audit aid, not something worth interrupting a sender for. Keep the newest
+    // unsent events for a later flush and drop the rest by the queue cap above.
+    SharedReplay.queue.unshift(...events.slice(-120));
+    if (SharedReplay.queue.length > 600) SharedReplay.queue.splice(0, SharedReplay.queue.length - 600);
+  }).finally(() => { SharedReplay.flushing = null; });
+  return SharedReplay.flushing;
+}
+
+function replaySelector(el) {
+  if (!el || el === document || el === document.documentElement || el === document.body) return "document";
+  if (!(el instanceof Element)) return "document";
+  if (el.id) return `#${replayCssEscape(el.id)}`;
+  const root = el.closest("#modal,#app") || document.body;
+  const parts = [];
+  for (let n = el; n && n !== root && parts.length < 7; n = n.parentElement) {
+    let part = n.tagName.toLowerCase();
+    const name = n.getAttribute("name") || n.getAttribute("aria-label");
+    if (name) part += `[${n.hasAttribute("name") ? "name" : "aria-label"}="${replayAttrEscape(name)}"]`;
+    else if (n.parentElement) {
+      const same = [...n.parentElement.children].filter((c) => c.tagName === n.tagName);
+      if (same.length > 1) part += `:nth-of-type(${same.indexOf(n) + 1})`;
+    }
+    parts.unshift(part);
+  }
+  if (root.id) parts.unshift(`#${replayCssEscape(root.id)}`);
+  return parts.join(" > ") || "document";
+}
+
+function replayScrollInfo(target) {
+  let el = target === document ? document.scrollingElement : target;
+  if (!(el instanceof Element)) el = $("#content") || document.scrollingElement;
+  const doc = el === document.documentElement || el === document.body;
+  return {
+    selector: doc ? "document" : replaySelector(el),
+    x: Math.round(doc ? scrollX : el.scrollLeft),
+    y: Math.round(doc ? scrollY : el.scrollTop),
+    maxX: Math.max(0, Math.round((doc ? document.documentElement.scrollWidth : el.scrollWidth) - (doc ? innerWidth : el.clientWidth))),
+    maxY: Math.max(0, Math.round((doc ? document.documentElement.scrollHeight : el.scrollHeight) - (doc ? innerHeight : el.clientHeight))),
+  };
+}
+
+function replayFieldLabel(el) {
+  const lab = el.closest?.("label");
+  let text = "";
+  if (lab) {
+    const c = lab.cloneNode(true);
+    c.querySelectorAll("input,textarea,select,button").forEach((x) => x.remove());
+    text = c.textContent || "";
+  }
+  text = text || el.getAttribute?.("aria-label") || el.getAttribute?.("placeholder")
+    || el.getAttribute?.("name") || el.id || "a field";
+  return String(text).replace(/\s+/g, " ").trim().slice(0, 60) || "a field";
+}
+function replayPrivateField(el) {
+  if (!el || !(el instanceof Element)) return false;
+  if (el.closest("[data-private],[data-secret],[data-replay-private]")) return true;
+  const type = (el.getAttribute("type") || "").toLowerCase();
+  if (["password", "hidden"].includes(type)) return true;
+  const hay = [type, el.id, el.getAttribute("name"), el.getAttribute("autocomplete"),
+    el.getAttribute("placeholder"), el.getAttribute("aria-label"), replayFieldLabel(el)].join(" ");
+  return /password|passcode|secret|token|api\s*key|app\s*password|smtp/i.test(hay);
+}
+function replayFieldInfo(el) {
+  if (!el || !(el instanceof Element)) return null;
+  const editable = el.matches("input,textarea,select") || el.isContentEditable;
+  if (!editable) return null;
+  const redacted = replayPrivateField(el);
+  return { field: redacted ? "a private field" : replayFieldLabel(el), selector: replaySelector(el), redacted };
+}
+function replayFieldValue(el) {
+  if (!el || !(el instanceof Element)) return "";
+  if (el.matches("input[type=checkbox],input[type=radio]")) return el.checked ? "checked" : "not checked";
+  if (el.matches("select")) return [...el.selectedOptions].map((o) => o.textContent.trim()).join(", ");
+  if (el.isContentEditable) return el.innerText || "";
+  return String(el.value ?? "");
+}
+
+function replayControlHash(text) {
+  let h = 2166136261;
+  for (const ch of String(text)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+function replayControlId(el) {
+  const explicit = el.getAttribute("data-control-id");
+  if (explicit && /^[A-Za-z0-9_.:-]+$/.test(explicit)) return explicit;
+  const id = el.id;
+  if (id && /^[A-Za-z0-9_.:-]+$/.test(id)) return `id:${id}`;
+  for (const [attr, prefix] of [["data-route", "route"], ["data-go", "go"], ["data-detail", "detail"], ["data-draftfor", "draft"], ["data-sel", "select"]]) {
+    const v = el.getAttribute(attr);
+    if (v && /^[A-Za-z0-9_.:-]+$/.test(v)) return `${prefix}:${v}`;
+  }
+  return `auto:${replayControlHash(replaySelector(el))}`;
+}
+function ensureReplayControlIds(root) {
+  if (!(root instanceof Element)) return;
+  root.querySelectorAll("button,input,textarea,select,[role=button],a").forEach((el) => {
+    if (!replayPrivateField(el) && !el.hasAttribute("data-control-id")) el.setAttribute("data-control-id", replayControlId(el));
+  });
+}
+function cloneReplayNode(src) {
+  ensureReplayControlIds(src);
+  const clone = src.cloneNode(true);
+  const a = src.querySelectorAll?.("input,textarea,select") ?? [];
+  const b = clone.querySelectorAll?.("input,textarea,select") ?? [];
+  a.forEach((from, i) => {
+    const to = b[i];
+    if (!to) return;
+    if (replayPrivateField(from)) {
+      if (to.tagName === "TEXTAREA") to.textContent = "";
+      else to.setAttribute("value", "");
+      to.setAttribute("placeholder", "not recorded");
+      return;
+    }
+    if (from.tagName === "TEXTAREA") to.textContent = from.value;
+    else if (from.tagName === "SELECT") {
+      [...to.options].forEach((o, j) => o.toggleAttribute("selected", from.options[j]?.selected));
+    } else if (from.type === "checkbox" || from.type === "radio") to.toggleAttribute("checked", from.checked);
+    else to.setAttribute("value", from.value);
+  });
+  sanitizeReplaySnapshot(clone);
+  return clone;
+}
+function sanitizeReplaySnapshot(root) {
+  root.querySelectorAll?.("script,style,iframe,object,embed,link,meta,[data-replay-private]")
+    .forEach((el) => el.remove());
+  root.querySelectorAll?.("*").forEach((el) => {
+    for (const attr of [...el.attributes]) {
+      const name = attr.name.toLowerCase(), val = attr.value.trim();
+      if (name.startsWith("on") || name === "src" || name === "srcset" || name === "srcdoc" || name === "formaction") {
+        el.removeAttribute(attr.name);
+      } else if ((name === "href" || name.endsWith(":href")) && /^javascript:/i.test(val)) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+}
+function captureReplaySnapshot() {
+  const app = $("#app");
+  if (!app) return null;
+  const parts = [cloneReplayNode(app).outerHTML];
+  const modal = $("#modal");
+  if (modal?.innerHTML.trim()) parts.push(cloneReplayNode(modal).outerHTML);
+  const toast = $("#toast");
+  if (toast && !toast.classList.contains("hidden")) parts.push(cloneReplayNode(toast).outerHTML);
+  const html = parts.join("");
+  return { html: html.length > 450000 ? `${html.slice(0, 450000)}<!-- truncated -->` : html,
+    theme: document.documentElement.getAttribute("data-theme") || "light" };
+}
+
+function controlTargetFor(state = SharedControl.state) {
+  return state ? { sessionId: state.sessionId, tabId: state.tabId, replaySessionId: state.replaySessionId } : null;
+}
+function controlKeyFor(state) { return state ? `${state.sessionId}:${state.tabId}` : ""; }
+function setControlPill(on) {
+  let pill = $("#controlChip");
+  if (!on) { pill?.remove(); removeOwnerCursor(); stopControlHeartbeat(); stopControlPolling(); return; }
+  if (!pill) {
+    pill = document.createElement("div");
+    pill.id = "controlChip";
+    pill.className = "control-chip";
+    document.body.append(pill);
+  }
+  pill.innerHTML = `${icon("eye")} <span>Owner control is active</span>
+    <button type="button" class="control-stop">Stop control</button>`;
+  pill.querySelector(".control-stop").onclick = () => releaseSharedControl();
+}
+async function sendSharedControl(control, command) {
+  const target = controlTargetFor(control);
+  if (!target) return;
+  try { await api("/api/share/control/command", { ...target, command }); }
+  catch (e) { fail(e); }
+}
+async function requestSharedControl(target) {
+  try {
+    const r = await api("/api/share/control/request", controlTargetFor(target));
+    S.controlMap[controlKeyFor(r.control)] = r.control;
+    toast("Control requested…");
+    updateLiveView();
+  } catch (e) { fail(e); }
+}
+async function releaseSharedControl(target = SharedControl.state) {
+  const control = target?.state || target;
+  const payload = controlTargetFor(control);
+  if (!payload) return;
+  try {
+    await api("/api/share/control/release", payload);
+    if (S.surface === "shared") { SharedControl.state = null; setControlPill(false); }
+    else { delete S.controlMap[controlKeyFor(control)]; updateLiveView(); }
+    toast("Control released");
+  } catch (e) { fail(e); }
+}
+function startControlHeartbeat() {
+  stopControlHeartbeat();
+  const beat = async () => {
+    const target = controlTargetFor();
+    if (!target) return;
+    try {
+      const r = await api("/api/share/control/heartbeat", target);
+      if (!r.active) { SharedControl.state = null; setControlPill(false); }
+    } catch { /* a later heartbeat or session expiry will end control */ }
+  };
+  beat();
+  SharedControl.heartbeat = setInterval(beat, 4000);
+}
+function stopControlHeartbeat() {
+  if (SharedControl.heartbeat) { clearInterval(SharedControl.heartbeat); SharedControl.heartbeat = null; }
+}
+async function pollSharedControl() {
+  const target = controlTargetFor();
+  if (!target) return;
+  try {
+    const r = await api("/api/share/control/poll", target);
+    for (const item of r.commands ?? []) handleSharedControlEvent({ action: "command", ...item });
+  } catch { /* SSE remains the fast path; polling is only a fallback */ }
+}
+function startControlPolling() {
+  stopControlPolling();
+  pollSharedControl();
+  SharedControl.poll = setInterval(pollSharedControl, 350);
+}
+function stopControlPolling() {
+  if (SharedControl.poll) { clearInterval(SharedControl.poll); SharedControl.poll = null; }
+}
+function releaseOwnerControls() {
+  if (S.surface !== "local") return;
+  for (const control of Object.values(S.controlMap ?? {})) {
+    if (control.status === "active") releaseSharedControl(control);
+  }
+}
+function showControlRequest(control) {
+  if (SharedControl.request) return;
+  SharedControl.request = document.createElement("div");
+  SharedControl.request.id = "controlRequest";
+  SharedControl.request.className = "control-request";
+  SharedControl.request.innerHTML = `<span>${icon("eye")} <b>The owner wants to control this coldcall tab.</b>
+    <small>They can click, focus, type and scroll here. Sending and approvals still ask you first.</small></span>
+    <span class="row"><button class="btn sm" data-control-allow>Allow</button>
+      <button class="btn sm ghost" data-control-deny>Not now</button></span>`;
+  document.body.append(SharedControl.request);
+  SharedControl.request.querySelector("[data-control-allow]").onclick = async () => {
+    const target = { sessionId: control.sessionId, tabId: control.tabId, replaySessionId: control.replaySessionId };
+    try {
+      const r = await api("/api/share/control/grant", target);
+      activateSharedControl(r.control || control);
+      SharedControl.request?.remove(); SharedControl.request = null;
+    } catch (e) { fail(e); }
+  };
+  SharedControl.request.querySelector("[data-control-deny]").onclick = async () => {
+    try { await api("/api/share/control/deny", control); } catch { /* request may have expired */ }
+    SharedControl.request?.remove(); SharedControl.request = null;
+  };
+}
+function activateSharedControl(control) {
+  SharedControl.state = control;
+  setControlPill(true);
+  startControlHeartbeat();
+  startControlPolling();
+}
+function handleSharedControlEvent(d) {
+  const c = d.control || d;
+  if (!c || c.tabId !== SharedReplay.tabId) return;
+  if (d.action === "request") return showControlRequest(c);
+  if (d.action === "active") return activateSharedControl(c);
+  if (d.action === "released" || d.action === "denied") {
+    SharedControl.state = null; setControlPill(false); SharedControl.request?.remove(); SharedControl.request = null; return;
+  }
+  if (d.action === "command") {
+    if (d.commandId && SharedControl.seenCommands.has(d.commandId)) return;
+    if (d.commandId) {
+      SharedControl.seenCommands.add(d.commandId);
+      while (SharedControl.seenCommands.size > 500) SharedControl.seenCommands.delete(SharedControl.seenCommands.values().next().value);
+    }
+    executeSharedControl(d.command, d.commandId, c);
+  }
+}
+function setOwnerCursor(command) {
+  let cursor = $("#ownerControlCursor");
+  if (!command.visible) return removeOwnerCursor();
+  if (!cursor) {
+    cursor = document.createElement("div");
+    cursor.id = "ownerControlCursor";
+    cursor.className = "owner-control-cursor";
+    cursor.innerHTML = `<span>Owner</span>`;
+    document.body.append(cursor);
+  }
+  cursor.style.left = `${Math.max(0, Math.min(1, command.x)) * 100}%`;
+  cursor.style.top = `${Math.max(0, Math.min(1, command.y)) * 100}%`;
+}
+function removeOwnerCursor() { $("#ownerControlCursor")?.remove(); }
+function safeControlElement(controlId) {
+  if (!controlId || !/^[A-Za-z0-9_.:-]+$/.test(controlId)) return null;
+  let el = null;
+  try { el = document.querySelector(`[data-control-id="${controlId}"],#${replayCssEscape(controlId)}`); } catch { return null; }
+  if (!el || (!el.closest("#app") && !el.closest("#modal"))) return null;
+  if (replayPrivateField(el)) return null;
+  return el;
+}
+function localConfirmation(el, command) {
+  if (command.type !== "click" || !el.matches?.("button,a,[role=button]")) return true;
+  const text = `${el.id || ""} ${el.getAttribute?.("data-control-id") || ""} ${el.textContent || ""}`;
+  if (!/(approve|send|suppress|never-contact|bulk)/i.test(text)) return true;
+  return confirm(`The owner asked to use this action.\n\nContinue on this coldcall tab?`);
+}
+function executeSharedControl(command, id, control) {
+  if (!SharedControl.state || SharedControl.state.status !== "active" || control.tabId !== SharedReplay.tabId) return;
+  let ok = false, error = "";
+  try {
+    if (command.type === "pointer") { setOwnerCursor(command); ok = true; }
+    else if (command.type === "navigate") {
+      if (!canOpen(command.route)) throw new Error("that screen is not available here");
+      go(command.route); ok = true;
+    } else {
+      const el = safeControlElement(command.controlId);
+      if (!el) throw new Error("that control is unavailable or private");
+      if (el.matches?.("a")) {
+        const href = el.getAttribute("href") || "";
+        if (/^(https?:|\/\/)/i.test(href) && new URL(href, location.href).origin !== location.origin) {
+          throw new Error("external links stay local");
+        }
+      }
+      if (!localConfirmation(el, command)) throw new Error("local confirmation was declined");
+      if (command.type === "click") { el.click(); ok = true; }
+      else if (command.type === "focus") { el.focus(); ok = document.activeElement === el; }
+      else if (command.type === "type") {
+        if (!el.matches("input,textarea") || replayPrivateField(el)) throw new Error("typing there is not allowed");
+        el.value = command.value ?? "";
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: null }));
+        el.dispatchEvent(new Event("change", { bubbles: true })); ok = true;
+      } else if (command.type === "scroll") { el.scrollTo(command.x ?? 0, command.y ?? 0); ok = true; }
+    }
+  } catch (e) { error = e?.message || "the action could not be completed"; }
+  api("/api/share/control/result", { ...controlTargetFor(control), commandId: id, ok, error }).catch(() => {});
 }
 
 /** "Chrome on macOS" beats 180 characters of version numbers in a list of devices. */
@@ -2574,6 +2989,7 @@ async function renderShared() {
   const t = a.tunnel ?? {};
   const live = t.status === "ready" && !!t.url;
   const online = a.sessions.filter(isOnline);
+  const replays = a.replays ?? [];
 
   $("#content").innerHTML = page(`
     <div class="statgrid stagger">
@@ -2627,11 +3043,19 @@ async function renderShared() {
 
     <div class="card liveview-card" id="liveViewCard">
       <div class="card-head"><h2>${icon("eye")} Live view</h2>
-        <span class="cellsub">Their cursor and clicks inside the tab, as they happen.</span></div>
+        <span class="cellsub">Their coldcall tab, cursor, clicks and typing as they happen.</span></div>
       <div id="liveView" class="liveview"></div>
-      <p class="card-note">You see where they point, what they click and which field they are in —
-        not what they type into it. They are shown a “someone is watching” note while this screen
-        is open, which is on purpose and cannot be turned off.</p>
+      <p class="card-note">This is the shared coldcall tab only. The join screen explains what
+        is recorded. Passwords and secrets are redacted before they leave the tab.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>${icon("clock")} Scrollback</h2>
+        <span class="cellsub">Replay a shared tab from earlier.</span></div>
+      ${replays.length ? `<ul class="share-list replay-list">${replays.map(replayRow).join("")}</ul>`
+        : empty("clock", "No replay yet", "Once someone uses the shared link, their coldcall tab appears here for review.")}
+      <p class="card-note">Kept for seven days. Use this with the action feed below to answer
+        “what happened just before that approval?”</p>
     </div>
 
     <div class="card">
@@ -2653,6 +3077,14 @@ async function renderShared() {
   startWatchHeartbeat();
   S.presenceMap = {};
   for (const pstate of (a.presence ?? [])) S.presenceMap[pstate.sessionId] = pstate;
+  S.replayMap = {};
+  S.controlMap = {};
+  for (const control of (a.controls ?? [])) S.controlMap[controlKeyFor(control)] = control;
+  for (const state of (a.liveReplay ?? [])) {
+    const next = normalizeReplayState(state);
+    next.control = S.controlMap[controlKeyFor(next)];
+    S.replayMap[state.replaySessionId] = next;
+  }
   updateLiveView();
 
   $("#btnToShareSettings").onclick = () => go("settings");
@@ -2667,10 +3099,27 @@ async function renderShared() {
     catch (e) { fail(e); }
     renderShared().catch(fail);
   });
+  $$('[data-replay]').forEach((b) => b.onclick = () => showReplay(b.dataset.replay));
+  $("#auditFeed")?.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-replay-at]");
+    if (b) showReplay(b.dataset.replayAt, Number(b.dataset.replaySeq) || undefined);
+  });
   $$("[data-copy]").forEach((b) => b.onclick = async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
     catch { toast("Couldn't copy — select it and copy by hand", true); }
   });
+}
+
+function replayRow(r) {
+  const route = TITLES[r.last_route]?.[0] || r.last_route || "coldcall";
+  const span = Math.max(0, (r.ended_at ?? r.last_at) - r.started_at);
+  const mins = Math.max(1, Math.round(span / 60000));
+  return `<li>
+    <span class="dot ${Date.now() - r.last_at < 25000 ? "ok pulse" : ""}"></span>
+    <span><span>${esc(r.label || "Teammate")}</span>
+      <span class="cellsub">${esc(route)} · ${num(r.event_count)} event${r.event_count === 1 ? "" : "s"} · ${mins}m · ${esc(ago(r.last_at))}</span></span>
+    <button class="btn sm ghost" data-replay="${esc(r.id)}">${icon("play")} Replay</button>
+  </li>`;
 }
 
 function auditRow(e) {
@@ -2683,12 +3132,13 @@ function auditRow(e) {
       ${e.detail ? `<span class="cellsub">${esc(e.detail)}</span>` : ""}
       ${refused ? `<span class="cellsub mono">${esc(e.method)} ${esc(e.path)}</span>` : ""}
     </span>
-    <span class="feed-time" title="${esc(dt(e.created_at))}">${esc(e.label)} · ${esc(ago(e.created_at))}</span>
+    <span class="feed-time" title="${esc(dt(e.created_at))}">${esc(e.label)} · ${esc(ago(e.created_at))}
+      ${e.replay_session_id ? `<button class="btn sm ghost audit-replay" data-replay-at="${esc(e.replay_session_id)}" data-replay-seq="${esc(e.replay_seq ?? "")}">${icon("play")} Replay</button>` : ""}</span>
   </div>`;
 }
 
-/* The owner's heartbeat that says "I am watching", so the co-founder's chip stays lit. Decays
-   on its own server-side, and is stopped the moment the owner leaves this screen. */
+/* The owner's heartbeat marks the live view as active. It decays on its own server-side and is
+   stopped the moment the owner leaves this screen. */
 let _watchTimer = null;
 function startWatchHeartbeat() {
   stopWatchHeartbeat();
@@ -2699,67 +3149,304 @@ function startWatchHeartbeat() {
 function stopWatchHeartbeat() { if (_watchTimer) { clearInterval(_watchTimer); _watchTimer = null; } }
 
 /**
- * Draw the live view from S.presenceMap.
- *
- * Updates in place rather than re-rendering: a fresh innerHTML every frame would kill the CSS
- * transition that makes the cursor glide instead of teleport. Each session gets a box whose
- * aspect matches their window, a dot that eases to the new position, and a ripple on each click.
+ * Draw the owner-side co-browse panels. Replay sessions carry a sanitized mirror of the same UI;
+ * the older presence stream is kept as a fallback for tabs that have not upgraded yet.
  */
 function updateLiveView() {
   const host = $("#liveView");
   if (!host) return;
-  const fresh = Object.values(S.presenceMap ?? {}).filter((p) => Date.now() - p.at < 20000);
+  const replay = Object.values(S.replayMap ?? {}).filter((p) => Date.now() - p.at < 25000);
+  const replaySessionIds = new Set(replay.map((p) => p.sessionId));
+  const presence = Object.values(S.presenceMap ?? {})
+    .filter((p) => Date.now() - p.at < 20000 && !replaySessionIds.has(p.sessionId))
+    .map((p) => normalizeReplayState({
+      replaySessionId: `presence:${p.sessionId}`, sessionId: p.sessionId, label: p.label,
+      at: p.at, route: p.route, cursor: p.cursor, viewport: p.viewport, field: p.field,
+      clicks: (p.clicks ?? []).map((c, i) => ({ ...c, at: p.at + i, seq: i })), presenceOnly: true,
+    }));
+  drawCoBrowse(host, [...replay, ...presence], `${icon("user")}
+    <span>Nobody is moving around right now. When someone is using the shared link, their
+    coldcall tab shows up here.</span>`);
+}
 
-  if (!fresh.length) {
-    host.innerHTML = `<div class="liveview-idle">${icon("user")}
-      <span>Nobody is moving around right now. When someone is using the shared link, their
-      cursor shows up here.</span></div>`;
+function normalizeReplayState(s) {
+  return { ...s, clicks: s.clicks ?? [], seq: s.seq ?? 0 };
+}
+
+function drawCoBrowse(host, states, idleHtml) {
+  if (!states.length) {
+    host.innerHTML = `<div class="liveview-idle">${idleHtml}</div>`;
     return;
   }
+  host.querySelector(".liveview-idle")?.remove();
+  for (const p of states) drawCoBrowsePanel(host, p);
+  const live = new Set(states.map((p) => p.replaySessionId));
+  host.querySelectorAll("[data-live]").forEach((el) => { if (!live.has(el.dataset.live)) el.remove(); });
+}
 
-  for (const p of fresh) {
-    let panel = host.querySelector(`[data-live="${cssq(p.sessionId)}"]`);
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.className = "liveview-panel";
-      panel.dataset.live = p.sessionId;
-      panel.innerHTML = `
-        <div class="lv-head"><span class="lv-who">${esc(p.label || "Teammate")}</span>
-          <span class="lv-where cellsub"></span></div>
-        <div class="lv-screen"><div class="lv-cursor"></div><div class="lv-ripples"></div></div>
-        <div class="lv-field cellsub"></div>`;
-      host.append(panel);
-    }
-    const screen = panel.querySelector(".lv-screen");
-    const ar = p.viewport ? p.viewport.w / p.viewport.h : 16 / 9;
-    screen.style.aspectRatio = `${Math.max(0.4, Math.min(3, ar))}`;
-    panel.querySelector(".lv-where").textContent = TITLES[p.route]?.[0] ? `on ${TITLES[p.route][0]}` : "";
-    const dot = panel.querySelector(".lv-cursor");
-    if (p.cursor) {
-      dot.style.opacity = "1";
-      dot.style.left = `${(p.cursor.x * 100).toFixed(2)}%`;
-      dot.style.top = `${(p.cursor.y * 100).toFixed(2)}%`;
-    } else dot.style.opacity = "0";
-    const field = panel.querySelector(".lv-field");
-    field.textContent = p.field ? `typing in ${p.field}` : "";
-    field.classList.toggle("hidden", !p.field);
-    // Ripples: one per click, self-removing so they do not pile up.
-    const layer = panel.querySelector(".lv-ripples");
-    for (const c of (p.clicks ?? [])) {
-      if (layer.dataset.last && Number(layer.dataset.last) >= c.at) continue;
-      const r = document.createElement("span");
-      r.className = "lv-ripple";
-      r.style.left = `${(c.x * 100).toFixed(2)}%`;
-      r.style.top = `${(c.y * 100).toFixed(2)}%`;
-      layer.append(r);
-      setTimeout(() => r.remove(), 650);
-    }
-    if (p.clicks?.length) layer.dataset.last = String(Math.max(...p.clicks.map((c) => c.at)));
+function drawCoBrowsePanel(host, p) {
+  let panel = host.querySelector(`[data-live="${cssq(p.replaySessionId)}"]`);
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.className = "liveview-panel";
+    panel.dataset.live = p.replaySessionId;
+    panel.innerHTML = `
+      <div class="lv-head"><span class="lv-who"></span>
+        <span class="lv-where cellsub"></span>
+        <button class="btn sm ghost lv-control-btn hidden" type="button"></button>
+        <button class="btn sm ghost lv-replay-btn hidden" type="button">${icon("play")} Replay</button></div>
+      <div class="lv-screen"><div class="lv-mirror" aria-hidden="true"></div><div class="lv-cursor"></div><div class="lv-ripples"></div></div>
+      <div class="lv-field cellsub hidden"></div>`;
+    host.append(panel);
+    panel.querySelector(".lv-mirror").addEventListener("mousemove", throttle((event) => {
+      const liveControl = panel._coldcallControl;
+      if (!liveControl || liveControl.status !== "active") return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      sendSharedControl(liveControl, { type: "pointer",
+        x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height });
+    }, 80), { passive: true });
+    panel.querySelector(".lv-mirror").addEventListener("click", (event) => {
+      // Capture-phase cancellation is important: the snapshot contains buttons and links, but
+      // it is not a second app. Stop a cloned handler before it can route the owner's page or
+      // open a link; only the explicit control command may reach the teammate's tab.
+      event.preventDefault();
+      event.stopPropagation();
+      const liveControl = panel._coldcallControl;
+      if (!liveControl || liveControl.status !== "active") return;
+      const target = event.target.closest?.("[data-control-id],button,a,input,select,textarea,[role=button]");
+      const controlId = target?.dataset?.controlId || target?.id;
+      if (!controlId) return toast("That control has no safe target", true);
+      sendSharedControl(liveControl, { type: target.matches("input,textarea,select") ? "focus" : "click", controlId });
+    }, true);
+    panel.querySelector(".lv-mirror").addEventListener("input", (event) => {
+      event.stopPropagation();
+      const liveControl = panel._coldcallControl, target = event.target;
+      if (!liveControl || liveControl.status !== "active" || !target.matches?.("input,textarea")) return;
+      const controlId = target.dataset?.controlId || target.id;
+      if (controlId && !replayPrivateField(target)) sendSharedControl(liveControl, { type: "type", controlId, value: target.value });
+    }, true);
+    panel.querySelector(".lv-mirror").addEventListener("wheel", (event) => {
+      const liveControl = panel._coldcallControl;
+      if (!liveControl || liveControl.status !== "active") return;
+      const target = event.target.closest?.("[data-control-id],#content") || event.currentTarget.querySelector("#content");
+      const controlId = target?.dataset?.controlId || target?.id;
+      if (!controlId) return;
+      event.preventDefault();
+      sendSharedControl(liveControl, { type: "scroll", controlId,
+        x: Math.max(0, target.scrollLeft + event.deltaX), y: Math.max(0, target.scrollTop + event.deltaY) });
+    }, { passive: false });
   }
 
-  // Drop panels for sessions that have gone quiet.
-  const live = new Set(fresh.map((p) => p.sessionId));
-  host.querySelectorAll("[data-live]").forEach((el) => { if (!live.has(el.dataset.live)) el.remove(); });
+  panel.querySelector(".lv-who").textContent = p.label || "Teammate";
+  const where = TITLES[p.route]?.[0] ? `on ${TITLES[p.route][0]}` : (p.route ? `on ${p.route}` : "");
+  panel.querySelector(".lv-where").textContent = where;
+  const replayBtn = panel.querySelector(".lv-replay-btn");
+  replayBtn.classList.toggle("hidden", !!p.presenceOnly || !!p.replayOnly);
+  replayBtn.onclick = () => showReplay(p.replaySessionId);
+  const control = p.control || S.controlMap?.[controlKeyFor(p)];
+  panel._coldcallControl = control;
+  const controlBtn = panel.querySelector(".lv-control-btn");
+  controlBtn.classList.toggle("hidden", !!p.presenceOnly || !!p.replayOnly);
+  controlBtn.textContent = control?.status === "active" ? "Release control"
+    : control?.status === "requested" ? "Control requested" : "Request control";
+  controlBtn.disabled = control?.status === "requested";
+  controlBtn.onclick = () => control?.status === "active"
+    ? releaseSharedControl(p)
+    : requestSharedControl(p);
+
+  const screen = panel.querySelector(".lv-screen");
+  const vp = p.viewport ?? { w: 1280, h: 800 };
+  const ar = Math.max(0.4, Math.min(3, vp.w / Math.max(1, vp.h)));
+  screen.style.aspectRatio = String(ar);
+
+  const mirror = panel.querySelector(".lv-mirror");
+  mirror.classList.toggle("control-active", control?.status === "active" && !p.presenceOnly && !p.replayOnly);
+  mirror.style.width = `${vp.w}px`;
+  mirror.style.height = `${vp.h}px`;
+  mirror.style.transform = `scale(${(screen.clientWidth || 1) / Math.max(1, vp.w)})`;
+  if (p.snapshot?.html && mirror.dataset.snapshotAt !== String(p.snapshot.at)) {
+    mirror.innerHTML = safeMirrorHtml(p.snapshot.html);
+    mirror.dataset.snapshotAt = String(p.snapshot.at);
+  } else if (!p.snapshot?.html && !mirror.innerHTML) {
+    mirror.innerHTML = `<div class="lv-placeholder">${icon("eye")} Waiting for the page mirror…</div>`;
+  }
+  applyMirrorState(mirror, p);
+
+  const dot = panel.querySelector(".lv-cursor");
+  if (p.cursor) {
+    dot.style.opacity = "1";
+    dot.style.left = `${(p.cursor.x * 100).toFixed(2)}%`;
+    dot.style.top = `${(p.cursor.y * 100).toFixed(2)}%`;
+  } else dot.style.opacity = "0";
+
+  const field = panel.querySelector(".lv-field");
+  const typed = p.typed ? ` · ${p.typed === "not recorded" ? "not recorded" : `“${clipOneLine(p.typed, 140)}”`}` : "";
+  const key = !p.field && p.key ? `pressed ${p.key.label}` : "";
+  field.textContent = p.field ? `typing in ${p.field}${typed}` : key;
+  field.classList.toggle("hidden", !p.field && !key);
+
+  const layer = panel.querySelector(".lv-ripples");
+  for (const c of (p.clicks ?? [])) {
+    const mark = c.seq ?? c.at ?? 0;
+    if (layer.dataset.last && Number(layer.dataset.last) >= mark) continue;
+    const r = document.createElement("span");
+    r.className = "lv-ripple";
+    r.style.left = `${(c.x * 100).toFixed(2)}%`;
+    r.style.top = `${(c.y * 100).toFixed(2)}%`;
+    layer.append(r);
+    setTimeout(() => r.remove(), 650);
+  }
+  if (p.clicks?.length) layer.dataset.last = String(Math.max(...p.clicks.map((c) => c.seq ?? c.at ?? 0)));
+}
+
+function safeMirrorHtml(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html;
+  sanitizeReplaySnapshot(t.content);
+  // The owner-side mirror is a control surface, never a second browser. A link in the
+  // snapshot must not navigate the owner's window or open the teammate's external site.
+  t.content.querySelectorAll("a").forEach((a) => {
+    a.removeAttribute("href");
+    a.removeAttribute("target");
+    a.setAttribute("aria-disabled", "true");
+  });
+  t.content.querySelectorAll("button").forEach((b) => b.setAttribute("type", "button"));
+  return t.innerHTML;
+}
+function mirrorTarget(mirror, selector) {
+  if (!selector || selector === "document") return mirror.querySelector("#content") || mirror;
+  try { return mirror.querySelector(selector) || mirror.querySelector("#content") || mirror; }
+  catch { return mirror.querySelector("#content") || mirror; }
+}
+function setMirrorControlValue(el, value) {
+  if (!el) return;
+  if (el.matches?.("input[type=checkbox],input[type=radio]")) el.checked = value === "checked";
+  else if (el.matches?.("textarea,input,select")) el.value = value;
+  else if (el.isContentEditable) el.textContent = value;
+}
+function applyMirrorState(mirror, p) {
+  if (p.selector && p.typed && p.typed !== "not recorded") setMirrorControlValue(mirrorTarget(mirror, p.selector), p.typed);
+  if (p.scroll) {
+    const el = mirrorTarget(mirror, p.scroll.selector);
+    if (el) { el.scrollLeft = p.scroll.x || 0; el.scrollTop = p.scroll.y || 0; }
+  }
+}
+function clipOneLine(s, n) {
+  const x = String(s ?? "").replace(/\s+/g, " ").trim();
+  return x.length > n ? `${x.slice(0, n - 1)}…` : x;
+}
+function replayKeyLabel(p) {
+  const mods = [p.meta ? "⌘" : "", p.ctrl ? "Ctrl" : "", p.alt ? "Alt" : "", p.shift ? "Shift" : ""]
+    .filter(Boolean).join("+");
+  return mods ? `${mods}+${p.key || "key"}` : (p.key || "key");
+}
+
+function applyReplayEvent(state, e) {
+  state.at = Math.max(state.at || 0, e.at || Date.now());
+  state.seq = Math.max(state.seq || 0, e.seq || 0);
+  if (e.route) state.route = e.route;
+  const p = e.payload ?? {};
+  if (e.type === "pointer") state.cursor = { x: p.x, y: p.y };
+  else if (e.type === "click") {
+    state.cursor = { x: p.x, y: p.y };
+    state.clicks = [...(state.clicks ?? []), { x: p.x, y: p.y, at: e.at, seq: e.seq }].slice(-12);
+  } else if (e.type === "viewport") state.viewport = { w: p.w, h: p.h };
+  else if (e.type === "scroll") state.scroll = { selector: p.selector || "#content", x: p.x || 0, y: p.y || 0, maxX: p.maxX || 0, maxY: p.maxY || 0 };
+  else if (e.type === "focus") { state.field = p.field || ""; state.selector = p.selector || ""; }
+  else if (e.type === "blur") { state.field = ""; state.selector = ""; }
+  else if (e.type === "input") { state.field = p.field || state.field || ""; state.selector = p.selector || state.selector || ""; state.typed = p.redacted ? "not recorded" : String(p.value ?? ""); }
+  else if (e.type === "key") state.key = { label: replayKeyLabel(p), at: e.at };
+  else if (e.type === "route") state.route = p.route || e.route || state.route;
+  else if (e.type === "snapshot") state.snapshot = { html: String(p.html ?? ""), theme: String(p.theme ?? ""), at: e.at };
+}
+
+async function showReplay(id, aroundSeq) {
+  if (!id) return;
+  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="palette dialog replay-dialog" role="dialog" aria-modal="true">
+    <h2 class="dialog-head">Session replay</h2><div class="dialog-body">${skeleton(3)}</div></div></div>`;
+  try {
+    const { replay, events } = await api(`/api/share/replays/${encodeURIComponent(id)}/events`);
+    if (!events.length) throw new Error("that replay has no events yet");
+    const around = aroundSeq ? events.findIndex((e) => e.seq >= aroundSeq) : 0;
+    const anchor = aroundSeq ? (around >= 0 ? around : events.length - 1) : 0;
+    const startAt = aroundSeq ? (events[anchor]?.at ?? events[0].at) - 15000 : events[0].at;
+    const startIndex = events.findIndex((e) => e.at >= startAt);
+    paintReplayDialog(replay, events, startIndex < 0 ? events.length - 1 : startIndex);
+  } catch (e) { fail(e); $("#modal").innerHTML = ""; }
+}
+
+function paintReplayDialog(replay, events, startIndex) {
+  const stateTo = (i) => {
+    const s = normalizeReplayState({
+      replaySessionId: replay.id, sessionId: replay.share_session_id, tabId: replay.tab_id,
+      label: replay.label || "Teammate", at: replay.started_at, route: replay.last_route,
+      viewport: { w: 1280, h: 800 }, clicks: [], seq: 0, replayOnly: true,
+    });
+    for (const e of events.slice(0, i)) applyReplayEvent(s, e);
+    return s;
+  };
+  S.playback = { replay, events, index: startIndex, state: stateTo(startIndex), playing: false, timer: null, rate: 1, stateTo };
+
+  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="palette dialog replay-dialog" role="dialog" aria-modal="true" aria-label="Session replay">
+    <h2 class="dialog-head">Session replay</h2>
+    <div class="dialog-body">
+      <div class="replay-top"><div><b>${esc(replay.label || "Teammate")}</b>
+        <div class="cellsub">${esc(dt(replay.started_at))} · ${num(events.length)} event${events.length === 1 ? "" : "s"}</div></div>
+        <button class="btn sm ghost" id="replayClose">${icon("xmark")} Close</button></div>
+      <div id="replayStage" class="liveview replay-stage"></div>
+    </div>
+    <div class="dialog-foot replay-foot">
+      <button class="btn" id="replayPlay">${icon("play")} Play</button>
+      <label class="field replay-speed">Speed
+        <select id="replayRate"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+      <input type="range" id="replayScrub" min="0" max="${Math.max(0, events.length - 1)}" value="${startIndex}">
+      <span class="cellsub mono" id="replayTime"></span>
+    </div>
+  </div></div>`;
+  $("#scrim").onclick = (e) => { if (e.target.id === "scrim") closeReplay(); };
+  $("#replayClose").onclick = closeReplay;
+  $("#replayPlay").onclick = toggleReplay;
+  $("#replayRate").onchange = (e) => { S.playback.rate = Number(e.target.value) || 1; };
+  $("#replayScrub").oninput = (e) => {
+    stopReplayTimer();
+    S.playback.playing = false;
+    S.playback.index = Number(e.target.value) || 0;
+    S.playback.state = S.playback.stateTo(S.playback.index);
+    drawReplayFrame();
+  };
+  drawReplayFrame();
+}
+function closeReplay() { stopReplayTimer(); S.playback = null; $("#modal").innerHTML = ""; }
+function stopReplayTimer() { if (S.playback?.timer) { clearTimeout(S.playback.timer); S.playback.timer = null; } }
+function toggleReplay() {
+  const pb = S.playback;
+  if (!pb) return;
+  pb.playing = !pb.playing;
+  $("#replayPlay").innerHTML = pb.playing ? `${icon("pause")} Pause` : `${icon("play")} Play`;
+  if (pb.playing) stepReplay(); else stopReplayTimer();
+}
+function stepReplay() {
+  const pb = S.playback;
+  if (!pb?.playing) return;
+  if (pb.index >= pb.events.length) { pb.playing = false; $("#replayPlay").innerHTML = `${icon("play")} Play`; return; }
+  const e = pb.events[pb.index];
+  const prev = pb.events[pb.index - 1]?.at ?? e.at;
+  const delay = Math.max(18, Math.min(900, (e.at - prev) / pb.rate));
+  pb.timer = setTimeout(() => {
+    applyReplayEvent(pb.state, e);
+    pb.index += 1;
+    drawReplayFrame();
+    stepReplay();
+  }, delay);
+}
+function drawReplayFrame() {
+  const pb = S.playback, host = $("#replayStage");
+  if (!pb || !host) return;
+  drawCoBrowse(host, [pb.state], "");
+  const cur = pb.events[Math.min(pb.index, pb.events.length - 1)];
+  $("#replayScrub").value = String(Math.min(pb.index, pb.events.length - 1));
+  $("#replayTime").textContent = `${pb.index}/${pb.events.length} · ${dt(cur?.at)}`;
 }
 
 /** Escape a value for use inside a CSS attribute selector. */
@@ -2780,8 +3467,8 @@ function markSharedSurface(me) {
   const foot = document.querySelector(".sidebar-foot");
   const who = document.createElement("div");
   who.className = "shared-badge";
-  who.title = "You are working on someone else's machine. What you approve, send, change or "
-    + "export is recorded there.";
+  who.title = "You are working on someone else's machine. The owner can watch and replay this "
+    + "coldcall tab and can ask to control it. Passwords and secrets are not recorded.";
   who.innerHTML = `
     <span class="shared-dot" aria-hidden="true"></span>
     <span class="sidebar-foot-text shared-text">
@@ -2919,6 +3606,26 @@ function connectEvents() {
     (S.presenceMap ??= {})[p.sessionId] = p;
     updateLiveView();
   });
+  ev.addEventListener("share:replay", (e) => {
+    const d = JSON.parse(e.data);
+    if (S.route !== "shared") return;
+    const next = normalizeReplayState(d.session);
+    next.control = d.control || S.controlMap?.[controlKeyFor(next)];
+    (S.replayMap ??= {})[d.session.replaySessionId] = next;
+    updateLiveView();
+  });
+  ev.addEventListener("share:control", (e) => {
+    const d = JSON.parse(e.data);
+    if (S.surface === "shared") { handleSharedControlEvent(d); return; }
+    const c = d.control || d;
+    if (!c?.sessionId || !c?.tabId) return;
+    if (d.action === "released" || d.action === "denied") delete S.controlMap[controlKeyFor(c)];
+    else S.controlMap[controlKeyFor(c)] = c;
+    for (const state of Object.values(S.replayMap ?? {})) {
+      if (controlKeyFor(state) === controlKeyFor(c)) state.control = S.controlMap[controlKeyFor(c)];
+    }
+    updateLiveView();
+  });
   // Live, because "what are they doing" is a present-tense question. Prepending rather than
   // re-rendering keeps the scroll position where the reader put it.
   ev.addEventListener("share:activity", (e) => {
@@ -2960,7 +3667,9 @@ async function renderJoin(autoToken) {
           ${message ? `<p class="join-error">${esc(message)}</p>` : ""}
           <p class="join-foot">Everything you do here happens on your teammate's machine.
             The mailbox, the keys and the model settings stay there — this link cannot read them.
-            What you approve, send, change or export is recorded on that machine, for them to see.</p>
+            They can watch and replay this coldcall tab — cursor, clicks, scroll, focused fields and
+            text typed inside coldcall. They may also ask to control the tab; you must allow that first.
+            Passwords and secrets are not recorded.</p>
         </div>
       </div>`;
     if (state !== "working") {

@@ -25,6 +25,12 @@ import {
 import { install as installCloudflared, installHint, locateCloudflared } from "../tunnel/cloudflared.ts";
 import { auditSummary, listAudit } from "./audit.ts";
 import { isWatched, livePresence, markWatching, recordPresence } from "./presence.ts";
+import { listReplayEvents, listReplays, liveReplayStates, recordReplayBatch, replaySession } from "./replay.ts";
+import {
+  acknowledgeControlCommand, allControls, cleanControlCommand, clearControls, clearControlsForSession,
+  commandId, controlFor, denyControl, grantControl, heartbeatControl, queueControlCommand,
+  releaseControl, requestControl, takeControlCommands,
+} from "./control.ts";
 import {
   deleteCredential, getCompanyProfile, identityLine, listCredentials, profileComplete,
   putCredential, setCompanyProfile, vaultKeyFile,
@@ -1020,6 +1026,7 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.post("/api/share/stop", async () => {
+    clearControls();
     await app.tunnel.stop();
     app.log("shared surface closed");
     app.bus.emit("share:changed", app.tunnel.state(), true);
@@ -1055,13 +1062,16 @@ export function registerRoutes(r: Router, app: AppContext): void {
   });
 
   r.post("/api/share/invite/:id/revoke", ({ params }: RouteCtx) => {
+    const ended = db.prepare("SELECT id FROM share_session WHERE invite_id=? AND revoked_at IS NULL").all(params.id) as Array<{ id: string }>;
     const sessions = revokeInvite(db, params.id);
+    ended.forEach((s) => clearControlsForSession(s.id));
     app.bus.emit("share:changed", app.tunnel.state(), true);
     return { ok: true, sessionsEnded: sessions };
   });
 
   r.post("/api/share/session/:id/revoke", ({ params }: RouteCtx) => {
     if (!revokeSession(db, params.id)) throw bad("no such session", "NOT_FOUND", 404);
+    clearControlsForSession(params.id);
     app.bus.emit("share:changed", app.tunnel.state(), true);
     return { ok: true };
   });
@@ -1077,6 +1087,9 @@ export function registerRoutes(r: Router, app: AppContext): void {
     sessions: listSessions(db),
     tunnel: app.tunnel.state(),
     presence: livePresence(),
+    liveReplay: liveReplayStates(),
+    controls: allControls(),
+    replays: listReplays(db, { limit: 20 }),
     entries: listAudit(db, {
       limit: Number(query.get("limit")) || 200,
       sessionId: query.get("session") ?? undefined,
@@ -1088,8 +1101,8 @@ export function registerRoutes(r: Router, app: AppContext): void {
    * The co-founder's page reporting its own cursor, clicks and current screen so the owner can
    * watch live. Sender-allowed - it is their own activity, from their own page.
    *
-   * The response tells them whether anyone is actually watching, which is how their "someone is
-   * watching" chip lights up. There is deliberately no field here for the text they typed: the
+   * The response tells the shared page whether the owner has the live view open. There is
+   * deliberately no field here for the text they typed: the
    * point of a live cursor is to watch someone work, not to log their keystrokes.
    */
   r.post("/api/share/presence", ({ body, session, remote }: RouteCtx) => {
@@ -1102,11 +1115,141 @@ export function registerRoutes(r: Router, app: AppContext): void {
     return { watched: isWatched() };
   });
 
-  /** The owner, on the Shared access screen, heartbeating "I am watching". Decays on its own. */
+  /**
+   * The full co-browse stream from the shared tab. This is still sender-allowed only because it
+   * is their own page reporting itself; the resulting stream and replay are owner-only.
+   */
+  r.post("/api/share/replay", ({ body, session, remote }: RouteCtx) => {
+    if (!remote || !session) return { watched: false };
+    const batch = recordReplayBatch(db, {
+      shareSessionId: session.id,
+      label: session.label,
+      userAgent: session.user_agent,
+      input: body,
+    });
+    let control = controlFor({ sessionId: session.id, tabId: batch.replaySession.tab_id });
+    if (batch.events.some((e) => e.type === "end")) {
+      releaseControl({ sessionId: session.id, tabId: batch.replaySession.tab_id });
+      control = undefined;
+    }
+    app.bus.emit("share:replay", { session: batch.live, events: batch.events, control }, true);
+    return { ok: true, watched: isWatched(), replaySessionId: batch.replaySession.id, seq: batch.live.seq, control: control ?? null };
+  });
+
+  r.get("/api/share/replays", ({ query }: RouteCtx) => ({
+    replays: listReplays(db, { limit: Number(query.get("limit")) || 30, sessionId: query.get("session") ?? undefined }),
+  }));
+
+  r.get("/api/share/replays/:id/events", ({ params, query }: RouteCtx) => {
+    const replay = replaySession(db, params.id);
+    if (!replay) throw bad("no such replay", "NOT_FOUND", 404);
+    return { replay, events: listReplayEvents(db, params.id, { limit: Number(query.get("limit")) || 10_000 }) };
+  });
+
+  /** The owner, on the Shared access screen, heartbeating the live view. Decays on its own. */
   r.post("/api/share/watch", () => { markWatching(); return { ok: true }; });
+
+  /* ------------------------------------------------------------- tab control */
+  const targetFrom = (body: any) => ({ sessionId: body?.sessionId, tabId: body?.tabId, replaySessionId: body?.replaySessionId });
+  const requireOwner = (role: RouteCtx["role"]) => {
+    if (role !== "owner") throw bad("only the owner can control a shared tab", "OWNER_ONLY", 403);
+  };
+  const requireSelf = (session: RouteCtx["session"], body: any) => {
+    if (!session || body?.sessionId !== session.id) throw bad("that control request is not for this session", "CONTROL_REFUSED", 403);
+  };
+  const requireLiveTarget = (body: any) => {
+    const id = typeof body?.sessionId === "string" ? body.sessionId : "";
+    const row = db.prepare("SELECT id FROM share_session WHERE id=? AND revoked_at IS NULL AND expires_at > ?")
+      .get(id, now()) as { id?: string } | undefined;
+    if (!row) throw bad("that shared tab is no longer connected", "CONTROL_TARGET", 409);
+  };
+
+  r.post("/api/share/control/request", ({ body, role, app: ctxApp }) => {
+    requireOwner(role);
+    requireLiveTarget(body);
+    const state = requestControl(targetFrom(body));
+    if (!state) throw bad("choose a live shared tab first", "CONTROL_TARGET", 400);
+    ctxApp.bus.emit("share:control", { action: "request", control: state }, false, state.sessionId);
+    ctxApp.bus.emit("share:control", { action: "requested", control: state }, true);
+    return { ok: true, control: state };
+  });
+
+  r.post("/api/share/control/grant", ({ body, session, remote, app: ctxApp }) => {
+    if (!remote || !session) throw bad("this is only available on the shared tab", "CONTROL_REFUSED", 403);
+    requireSelf(session, body);
+    const state = grantControl(targetFrom(body));
+    if (!state) throw bad("that control request has expired", "CONTROL_EXPIRED", 409);
+    ctxApp.bus.emit("share:control", { action: "active", control: state }, true);
+    ctxApp.bus.emit("share:control", { action: "active", control: state }, false, state.sessionId);
+    return { ok: true, control: state };
+  });
+
+  r.post("/api/share/control/deny", ({ body, session, remote, app: ctxApp }) => {
+    if (!remote || !session) throw bad("this is only available on the shared tab", "CONTROL_REFUSED", 403);
+    requireSelf(session, body);
+    const target = targetFrom(body);
+    if (!denyControl(target)) throw bad("that control request has expired", "CONTROL_EXPIRED", 409);
+    ctxApp.bus.emit("share:control", { action: "denied", control: target }, true);
+    return { ok: true };
+  });
+
+  r.post("/api/share/control/release", ({ body, role, session, remote, app: ctxApp }) => {
+    if (role === "owner") requireOwner(role);
+    else if (!remote || !session) throw bad("this is only available on the shared tab", "CONTROL_REFUSED", 403);
+    if (role !== "owner") requireSelf(session, body);
+    const target = targetFrom(body);
+    if (!releaseControl(target)) throw bad("control is no longer active", "CONTROL_EXPIRED", 409);
+    ctxApp.bus.emit("share:control", { action: "released", control: target }, true);
+    ctxApp.bus.emit("share:control", { action: "released", control: target }, false, target.sessionId);
+    return { ok: true };
+  });
+
+  r.post("/api/share/control/heartbeat", ({ body, session, remote, app: ctxApp }) => {
+    if (!remote || !session) return { active: false };
+    requireSelf(session, body);
+    const state = heartbeatControl(targetFrom(body));
+    if (state) ctxApp.bus.emit("share:control", { action: "heartbeat", control: state }, true);
+    return { active: !!state, control: state ?? null };
+  });
+
+  r.post("/api/share/control/command", ({ body, role, app: ctxApp }) => {
+    requireOwner(role);
+    requireLiveTarget(body);
+    const target = targetFrom(body);
+    const state = controlFor(target);
+    if (!state || state.status !== "active") throw bad("control is not active for that tab", "CONTROL_INACTIVE", 409);
+    const command = cleanControlCommand(body?.command);
+    if (!command) throw bad("that control action is not allowed", "CONTROL_COMMAND", 400);
+    const id = commandId();
+    queueControlCommand(target, id, command);
+    ctxApp.bus.emit("share:control", { action: "command", commandId: id, control: state, command }, false, state.sessionId);
+    return { ok: true, commandId: id };
+  });
+
+  // SSE is the fast path. Polling is a deliberate fallback for restrictive proxies that buffer
+  // or drop long-lived event streams; commands are removed when taken and deduplicated in the tab.
+  r.post("/api/share/control/poll", ({ body, session, remote }) => {
+    if (!remote || !session) throw bad("this is only available on the shared tab", "CONTROL_REFUSED", 403);
+    requireSelf(session, body);
+    return { commands: takeControlCommands(targetFrom(body)) };
+  });
+
+  r.post("/api/share/control/result", ({ body, session, remote, app: ctxApp }) => {
+    if (!remote || !session) throw bad("this is only available on the shared tab", "CONTROL_REFUSED", 403);
+    requireSelf(session, body);
+    acknowledgeControlCommand(targetFrom(body), String(body?.commandId ?? "").slice(0, 100));
+    const state = controlFor(targetFrom(body));
+    if (!state || state.status !== "active") return { ok: false, active: false };
+    ctxApp.bus.emit("share:control", {
+      action: "result", control: state, commandId: String(body?.commandId ?? "").slice(0, 100),
+      ok: body?.ok === true, error: typeof body?.error === "string" ? body.error.slice(0, 200) : "",
+    }, true);
+    return { ok: true };
+  });
 
   /** The panic button: every invite and every session, gone, without closing the tunnel. */
   r.post("/api/share/revoke-all", () => {
+    clearControls();
     const counts = revokeEverything(db);
     app.bus.emit("share:changed", app.tunnel.state(), true);
     return counts;

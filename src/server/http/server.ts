@@ -15,6 +15,7 @@ import {
   type Role, type SessionRow,
 } from "./access.ts";
 import { describeAction, recordAudit } from "./audit.ts";
+import { replayMarkerForRequest } from "./replay.ts";
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../ui");
 
@@ -81,15 +82,15 @@ async function readBody(req: IncomingMessage): Promise<any> {
  * emit call sites are scattered and none of them look like an API response.
  */
 export class EventBus {
-  private readonly clients = new Set<{ res: ServerResponse; role: Role }>();
+  private readonly clients = new Set<{ res: ServerResponse; role: Role; sessionId?: string }>();
 
-  attach(res: ServerResponse, role: Role = "owner"): void {
+  attach(res: ServerResponse, role: Role = "owner", sessionId?: string): void {
     res.writeHead(200, {
       "content-type": "text/event-stream", "cache-control": "no-cache",
       connection: "keep-alive", "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
-    const client = { res, role };
+    const client = { res, role, sessionId };
     this.clients.add(client);
     // unref: a keepalive ping should never be the only thing keeping the process alive.
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, 25_000);
@@ -97,10 +98,11 @@ export class EventBus {
     res.on("close", () => { clearInterval(ping); this.clients.delete(client); });
   }
 
-  emit(type: string, data: unknown, ownerOnly = false): void {
+  emit(type: string, data: unknown, ownerOnly = false, targetSessionId?: string): void {
     const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const c of this.clients) {
       if (ownerOnly && c.role !== "owner") continue;
+      if (targetSessionId && c.sessionId !== targetSessionId) continue;
       try { c.res.write(frame); } catch { this.clients.delete(c); }
     }
   }
@@ -163,7 +165,9 @@ export function createApp(app: AppContext): Server {
       if (!isTunnel) return;
       // Presence is posted several times a second; a row each would drown the log it lives
       // next to. It is live-only state, and the audit trail already records what came of it.
-      if (path === "/api/share/presence") return;
+      if (["/api/share/presence", "/api/share/replay", "/api/share/control/heartbeat", "/api/share/control/poll", "/api/share/control/result"]
+        .includes(path)) return;
+      if (path === "/api/share/control/command" && body?.command?.type === "pointer") return;
       // A refusal is recorded whatever the method. `describeAction` deliberately ignores plain
       // reads, but "they reached for /api/keys" is a GET and is the single most interesting
       // line this log can contain — dropping it because of its verb would be absurd.
@@ -177,17 +181,20 @@ export function createApp(app: AppContext): Server {
       const joined = !session && status < 400 && path === "/api/share/redeem"
         ? app.db.prepare("SELECT id, label FROM share_session ORDER BY id DESC LIMIT 1").get() as { id: string; label: string } | undefined
         : undefined;
+      const replay = session ? replayMarkerForRequest(
+        app.db, session.id, req.headers["x-coldcall-replay"], req.headers["x-coldcall-replay-seq"],
+      ) : undefined;
       const row = recordAudit(app.db, {
         sessionId: session?.id ?? joined?.id ?? null,
         label: session?.label ?? joined?.label ?? "not signed in",
-        method, path, action: what.action, detail: what.detail, subject: what.subject, status,
+        method, path, action: what.action, detail: what.detail, subject: what.subject, status, replay,
       });
       if (row) app.bus.emit("share:activity", row, true);
     };
 
     if (path === "/api/events") {
       if (!role) return json(res, 401, { error: "this link needs an invite", code: "NO_SESSION" });
-      return app.bus.attach(res, role);
+      return app.bus.attach(res, role, session?.id);
     }
 
     if (path.startsWith("/api/")) {

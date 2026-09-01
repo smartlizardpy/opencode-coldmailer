@@ -257,7 +257,8 @@ th.num,td.num{text-align:right;font-family:var(--mono);font-size:12.5px}
 .feed-icon.bad{background:var(--bad-bg);color:var(--bad)}
 .feed-icon.warn{background:var(--warn-bg);color:var(--warn)}
 .feed-icon.ok{background:var(--ok-bg);color:var(--ok)}
-.feed-time{margin-left:auto;color:var(--muted);font-size:11.5px;white-space:nowrap;font-family:var(--mono)}
+.feed-time{margin-left:auto;color:var(--muted);font-size:11.5px;white-space:nowrap;font-family:var(--mono);
+  display:flex;flex-direction:column;align-items:flex-end;gap:var(--s1)}
 
 /* checklist */
 .checklist{display:flex;flex-direction:column;gap:2px}
@@ -716,7 +717,7 @@ body[data-surface="join"] .content { padding: 0; }
 @media (prefers-reduced-motion: reduce) { .audit-new { animation: none; } }
 
 /* ═══════════════════════════════════════════════ live view (owner watching a shared tab) */
-.liveview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s4); }
+.liveview { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--s4); }
 .liveview-idle { display: flex; align-items: center; gap: var(--s3); padding: var(--s6);
   color: var(--muted); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-lg);
   grid-column: 1 / -1; }
@@ -726,36 +727,74 @@ body[data-surface="join"] .content { padding: 0; }
   background: var(--inset); }
 .lv-head { display: flex; align-items: baseline; gap: var(--s2); padding: var(--s3) var(--s4);
   border-bottom: 1px solid var(--border); background: var(--raised); }
+.lv-head .btn { margin-left: auto; }
 .lv-who { font-weight: 600; font-size: 13px; }
 .lv-where { margin: 0; }
-/* The scaled stand-in for their window. A ground the cursor moves over — not a DOM mirror,
-   which would be fragile and is not what "where are they pointing" needs. */
+/* A scaled, inert mirror of the shared coldcall tab. The browser is not captured; only the DOM
+   that coldcall itself rendered is copied here, with the live cursor and clicks over it. */
 .lv-screen { position: relative; width: 100%; aspect-ratio: 16 / 9; background: var(--bg);
-  background-image: linear-gradient(var(--border) 1px, transparent 1px),
-                    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 24px 24px; background-position: -1px -1px; opacity: .6; }
+  overflow: hidden; isolation: isolate; }
+.lv-mirror { position: absolute; inset: 0 auto auto 0; transform-origin: 0 0;
+  pointer-events: none; background: var(--bg); color: var(--text); z-index: 0; }
+.lv-mirror * { pointer-events: none !important; caret-color: transparent !important; }
+.lv-mirror.control-active { pointer-events: auto; cursor: pointer; }
+.lv-mirror.control-active * { pointer-events: auto !important; }
+.lv-mirror .app { height: 100% !important; width: 100% !important; min-height: 0; }
+.lv-mirror .content { scroll-behavior: auto !important; }
+.lv-mirror #modal .scrim { position: absolute; }
+.lv-placeholder { height: 100%; display: grid; place-items: center; gap: var(--s2);
+  color: var(--muted); background: var(--surface); font-size: 13px; }
+.lv-placeholder svg { width: 22px; height: 22px; }
 .lv-cursor { position: absolute; width: 14px; height: 14px; margin: -3px 0 0 -3px; opacity: 0;
   transition: left 140ms linear, top 140ms linear, opacity 200ms; pointer-events: none;
-  filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); z-index: 3; }
 /* A cursor arrow drawn in CSS, tinted to the accent so it reads against either theme. */
 .lv-cursor::before { content: ""; display: block; width: 0; height: 0;
   border-left: 7px solid var(--accent); border-top: 5px solid transparent;
   border-bottom: 5px solid transparent; transform: rotate(45deg); }
-.lv-ripples { position: absolute; inset: 0; pointer-events: none; }
+.lv-ripples { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 .lv-ripple { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px;
   border-radius: 50%; background: var(--accent); animation: lvRipple 620ms var(--ease) forwards; }
 @keyframes lvRipple {
   from { transform: scale(.4); opacity: .8; }
   to   { transform: scale(3.5); opacity: 0; }
 }
-.lv-field { padding: var(--s2) var(--s4) var(--s3); margin: 0; min-height: 1.4em; }
-
-/* The disclosure chip on the co-founder's side. Fixed, quiet, and permanent while watched —
-   the honesty of the whole feature lives in this staying put. */
-.watch-chip { position: fixed; bottom: var(--s5); left: var(--s5); z-index: 80;
-  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s4);
+.lv-field { padding: var(--s2) var(--s4) var(--s3); margin: 0; min-height: 1.4em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replay-list { margin-top: 0; }
+.audit-replay { margin-top: var(--s1); }
+.replay-dialog { width: min(980px, 96vw); max-height: min(90vh, 860px); }
+.replay-stage { grid-template-columns: 1fr; }
+.replay-top { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s3);
+  margin-bottom: var(--s4); }
+.replay-foot { align-items: center; }
+.replay-foot input[type="range"] { flex: 1; min-width: 160px; }
+.replay-speed { width: 80px; margin: 0; }
+.replay-speed select { padding: 4px var(--s2); }
+.control-chip { position: fixed; bottom: var(--s5); left: var(--s5); z-index: 80;
+  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3);
   border-radius: var(--r-pill); font-size: 12.5px; font-weight: 500;
   background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow-md);
   animation: fadein var(--base) var(--ease) both; }
-.watch-chip svg { width: 14px; height: 14px; }
-@media (prefers-reduced-motion: reduce) { .lv-cursor { transition: opacity 200ms; } .lv-ripple { animation: none; } }
+.control-chip svg { width: 14px; height: 14px; }
+.control-stop { border: 0; border-left: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  background: transparent; color: inherit; font: inherit; font-size: 12px; font-weight: 600;
+  padding: 0 0 0 var(--s2); cursor: pointer; }
+.control-stop:hover { text-decoration: underline; }
+.control-request { position: fixed; bottom: var(--s5); left: var(--s5); z-index: 80;
+  display: flex; align-items: center; gap: var(--s4); max-width: min(560px, calc(100vw - 40px));
+  padding: var(--s3) var(--s4); border: 1px solid var(--primary); border-radius: var(--r-lg);
+  background: var(--raised); box-shadow: var(--shadow-lg); animation: fadein var(--base) var(--ease) both; }
+.control-request > span:first-child { display: flex; flex-direction: column; gap: 2px; }
+.control-request small { color: var(--muted); font-size: 12px; }
+.control-request .row { flex: none; }
+.owner-control-cursor { position: fixed; width: 0; height: 0; z-index: 81; pointer-events: none;
+  transition: left 80ms linear, top 80ms linear; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
+.owner-control-cursor::before { content: ""; display: block; width: 0; height: 0;
+  border-left: 8px solid var(--accent); border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent; transform: rotate(45deg); }
+.owner-control-cursor span { position: absolute; top: 10px; left: 8px; padding: 1px 5px;
+  border-radius: var(--r-sm); background: var(--accent); color: var(--on-accent);
+  font: 500 10px var(--sans); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) { .lv-cursor { transition: opacity 200ms; } .lv-ripple { animation: none; } .owner-control-cursor { transition: none; } }

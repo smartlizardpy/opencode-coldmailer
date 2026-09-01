@@ -145,6 +145,14 @@ What it cannot do, enforced on the server and not in the UI:
 Sends still happen from your machine, through your mailbox, under your caps and your window.
 Nothing about handing someone the link changes who the mail comes from or how fast it goes out.
 
+The Shared access screen also has a co-browse view for the shared coldcall tab: cursor, clicks,
+scroll, keyboard shortcuts, focused fields, typed text inside coldcall and a replayable scrollback
+linked to the action feed. It is not desktop sharing and it cannot see other tabs or windows.
+Passwords, tokens and secret-looking fields are redacted before they leave the shared tab, and the
+join screen explains what is recorded. The owner may request control of the coldcall tab, but it
+only becomes active after the teammate allows it; an active control pill and Stop control action
+remain visible on that tab.
+
 **How it is held shut.** The server only answers two `Host` headers: the loopback, and the exact
 hostname the tunnel is currently answering on — so a closed tunnel is not a hostname anything will
 trust, and DNS rebinding has nothing to aim at. An invite is 256 bits and is stored only as a
