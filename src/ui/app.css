@@ -529,3 +529,233 @@ details[open] summary::before{transform:rotate(90deg)}
 .rf-label { color: var(--muted); font-size: 12px; }
 .rf-notes { margin: var(--s3) 0 0; padding-left: var(--s5); font-size: 12.5px; color: var(--muted); }
 .rf-notes li + li { margin-top: 3px; }
+
+/* ═══════════════════════════════════════════════ new campaign (its own screen)
+   The form was a modal, which put the single hardest question in the product — what KIND of
+   organisation — in a scrolling box between a name field and a number input. As a screen the
+   question can be first and large, the AI help can sit beside the field it helps with, and the
+   right rail can read the campaign back while it is being typed. */
+.wizard { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--s5); align-items: start; }
+.wizard-main { min-width: 0; display: flex; flex-direction: column; gap: var(--s5); }
+.wizard-aside { position: sticky; top: var(--s2); display: flex; flex-direction: column; gap: var(--s5); }
+.wizard-aside .card { margin-top: 0; }
+
+/* A step is a card whose number does the work a legend would: it says how many decisions are
+   left without a progress bar that lies about how long each one takes. */
+.step { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg);
+  padding: var(--s5); box-shadow: var(--shadow-sm); }
+.step-head { display: flex; gap: var(--s4); align-items: flex-start; margin-bottom: var(--s4); }
+.step-n { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--secondary); color: var(--primary);
+  font: 600 12px/1 var(--mono); font-variant-numeric: tabular-nums; margin-top: 1px; }
+.step h2 { font-size: 15px; letter-spacing: -0.01em; }
+.step-sub { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-top: var(--s2); max-width: 62ch; }
+.step-sub b { color: var(--text); font-weight: 600; }
+.step-tools { display: flex; align-items: center; gap: var(--s3); margin-top: var(--s3); flex-wrap: wrap; }
+.step-tools .cellsub { flex: 1; min-width: 200px; margin: 0; line-height: 1.5; }
+.step-grid { margin-top: var(--s4); align-items: start; }
+/* The checkbox and its explanation sit on the same baseline as the number input beside it. */
+.step-check { align-items: flex-start; gap: var(--s3); padding-top: 22px; }
+.step-check input { margin-top: 3px; }
+.step-check .cellsub { display: block; max-width: 40ch; }
+
+/* Discovery mode. Two options with real consequences deserve more than a <select>, which hides
+   one of them and describes neither. */
+.seg { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s3); }
+.seg-opt { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto;
+  gap: 2px var(--s3); text-align: left; padding: var(--s3) var(--s4); cursor: pointer;
+  background: var(--raised); border: 1px solid var(--border); border-radius: var(--r);
+  color: var(--text); font: inherit; transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease); }
+.seg-opt svg { grid-row: 1 / span 2; width: 16px; height: 16px; align-self: center; color: var(--muted); }
+.seg-opt:hover { border-color: var(--primary); }
+.seg-opt[aria-checked="true"] { border-color: var(--primary); background: var(--secondary); }
+.seg-opt[aria-checked="true"] svg { color: var(--primary); }
+.seg-label { font-weight: 600; font-size: 13.5px; }
+.seg-note { color: var(--muted); font-size: 12px; line-height: 1.45; }
+:root[data-theme="dark"] .seg-opt[aria-checked="true"] .seg-note,
+:root:not([data-theme="light"]) .seg-opt[aria-checked="true"] .seg-note { color: var(--text); opacity: .8; }
+
+/* AI help, above the first question rather than under it. A blank target field is where this
+   screen is hardest, so the offer of help belongs where the difficulty is. */
+.aihelp { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap;
+  padding: var(--s4) var(--s5); border-radius: var(--r-lg);
+  border: 1px solid var(--primary); background: var(--secondary); }
+.aihelp-text { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: var(--s1); }
+.aihelp-text b { display: flex; align-items: center; gap: var(--s2); font-size: 13.5px; }
+.aihelp-text span { font-size: 12.5px; line-height: 1.55; color: var(--text); opacity: .82; max-width: 66ch; }
+.aihelp .btn { flex: none; }
+
+.ideas { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--s3); }
+.idea { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2);
+  text-align: left; padding: var(--s4); cursor: pointer; font: inherit; color: var(--text);
+  background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg);
+  transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease); }
+.idea:hover { border-color: var(--primary); transform: translateY(-1px); }
+.idea b { font-size: 13.5px; }
+.idea-target { font-size: 12.5px; line-height: 1.5; }
+.idea-goal { display: flex; gap: var(--s2); align-items: baseline; font-size: 12.5px; color: var(--muted); }
+.idea-goal svg { width: 12px; height: 12px; }
+.idea-why { font-size: 12px; color: var(--muted); line-height: 1.5; font-style: italic; }
+.idea-use { margin-top: auto; padding-top: var(--s2); font-size: 12.5px; font-weight: 600; color: var(--primary); }
+
+/* The rail. It reads the campaign back as a sentence, because the failure being guarded
+   against is writing a topic where a kind belongs and not noticing. */
+.summary-list { display: grid; grid-template-columns: 1fr; gap: 2px; margin: 0; }
+.summary-list dt { font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); font-weight: 600; margin-top: var(--s3); }
+.summary-list dt:first-child { margin-top: 0; }
+.summary-list dd { margin: 0; font-size: 13px; line-height: 1.5; }
+.summary-list dd.unset { color: var(--muted); font-style: italic; }
+
+.gate-result { margin-top: var(--s3); padding: var(--s3) var(--s4); border-radius: var(--r);
+  border: 1px solid var(--bad); background: var(--inset); }
+.gate-result[data-pass="1"] { border-color: var(--ok); }
+.gate-verdict { display: flex; align-items: center; gap: var(--s2); }
+.gate-verdict .mono { font-size: 12px; color: var(--muted); }
+.gate-kinds { display: grid; grid-template-columns: 84px 1fr; gap: 2px var(--s3);
+  align-items: baseline; margin-top: var(--s3); font-size: 12.5px; }
+.gate-reason { margin: var(--s3) 0 0; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+
+@media (max-width: 900px) {
+  .wizard { grid-template-columns: 1fr; }
+  .wizard-aside { position: static; }
+}
+
+/* ═══════════════════════════════════════════════════════ the shared surface */
+
+/* A permanent, quiet reminder of whose machine this is. Without it, somebody eventually goes
+   looking for the mailbox settings, cannot find them, and concludes the app is broken. */
+.shared-badge { display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s3); margin-bottom: var(--s2);
+  border-radius: var(--r); background: var(--secondary); }
+.shared-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--accent); }
+.shared-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.shared-text b { font-size: 11.5px; }
+.shared-text span { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app[data-collapsed="1"] .shared-badge { justify-content: center; }
+
+/* The join screen. Not an error page: arriving here is the normal first thing that happens to
+   the person the link was sent to.
+
+   The shell is hidden while it is up. A sidebar full of sections you cannot open, next to a
+   health dot reporting on a machine you have not been let into yet, is noise at the one moment
+   the screen has a single job. */
+body[data-surface="join"] .sidebar,
+body[data-surface="join"] .topbar,
+body[data-surface="join"] .banner,
+body[data-surface="join"] .jobbar { display: none; }
+body[data-surface="join"] .app { grid-template-columns: 1fr; }
+body[data-surface="join"] .content { padding: 0; }
+
+.join { display: grid; place-items: center; min-height: 100%; padding: var(--s6); }
+.join-card { width: min(420px, 92vw); text-align: center; padding: var(--s8) var(--s6);
+  background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg); }
+.join-mark { display: grid; place-items: center; width: 40px; height: 40px; margin: 0 auto var(--s4);
+  border-radius: var(--r-lg); background: var(--primary); color: var(--on-primary); }
+.join-mark svg { width: 20px; height: 20px; }
+.join-card h1 { font-family: var(--display); font-size: 20px; letter-spacing: -0.02em; }
+.join-lede { margin: var(--s2) 0 var(--s5); color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+.join-field { text-align: left; }
+.join-field input { font-family: var(--mono); font-size: 12.5px; }
+.join-btn { width: 100%; justify-content: center; margin-top: var(--s4); }
+.join-spin { padding: var(--s5) 0; color: var(--muted); }
+.join-error { margin: var(--s4) 0 0; color: var(--bad); font-size: 12.5px; }
+.join-foot { margin: var(--s6) 0 0; padding-top: var(--s4); border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+/* ═══════════════════════════════════════════════════ share panel (settings) */
+.share-card[data-live="1"] { border-color: var(--primary); }
+.share-install { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap;
+  margin-top: var(--s4); padding: var(--s3) var(--s4); border-radius: var(--r);
+  border: 1px solid var(--border); background: var(--inset); }
+.share-install > div { flex: 1; min-width: 240px; }
+.share-install .cellsub { margin-top: var(--s1); line-height: 1.5; }
+.share-url { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;
+  margin-top: var(--s4); padding: var(--s3) var(--s4); border-radius: var(--r);
+  border: 1px solid var(--primary); background: var(--inset); }
+.share-url a { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12.5px; }
+.share-people { margin-top: var(--s5); padding-top: var(--s4); border-top: 1px solid var(--border); }
+.share-people-head { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s2); }
+.share-people-head b { font-size: 12.5px; }
+.share-people-head .btn { margin-left: auto; }
+.share-list { list-style: none; margin: 0; padding: 0; }
+.share-list li { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;
+  padding: var(--s3) 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.share-list li:last-child { border-bottom: 0; }
+.share-list li .cellsub { margin: 0; }
+.share-list li .btn { margin-left: auto; }
+
+.invite-done { text-align: center; padding: var(--s2) 0; }
+.invite-done h3 { margin: var(--s4) 0 var(--s3); font-size: 15px; }
+.invite-done .row { justify-content: center; }
+.invite-link { padding: var(--s3) var(--s4); margin-bottom: var(--s4); border-radius: var(--r);
+  border: 1px dashed var(--primary); background: var(--inset); overflow-wrap: anywhere;
+  font-size: 12px; text-align: left; }
+
+/* What the footer will say, built from the profile instead of retyped. */
+.identity-preview { display: grid; grid-template-columns: 84px 1fr; gap: var(--s3);
+  align-items: baseline; margin-top: var(--s4); padding: var(--s3) var(--s4);
+  border-radius: var(--r); border: 1px solid var(--border); background: var(--inset);
+  font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* ═══════════════════════════════════════════════ shared access (audit feed) */
+.audit-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.audit-line { font-size: 13px; }
+.audit-line .tag { margin-right: var(--s1); }
+.audit-body .cellsub { margin: 0; overflow-wrap: anywhere; }
+/* A row that arrived while you were watching. Brief, and gone - a permanent highlight would
+   just mean "everything since you opened the page", which is not a useful category. */
+.audit-new { animation: auditIn var(--base) var(--ease) both; }
+@keyframes auditIn {
+  from { opacity: 0; transform: translateY(-4px); background: var(--secondary); }
+  to   { opacity: 1; transform: none; background: transparent; }
+}
+.feed-item .dot { margin-top: 6px; }
+.share-list .dot { flex: none; }
+@media (prefers-reduced-motion: reduce) { .audit-new { animation: none; } }
+
+/* ═══════════════════════════════════════════════ live view (owner watching a shared tab) */
+.liveview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s4); }
+.liveview-idle { display: flex; align-items: center; gap: var(--s3); padding: var(--s6);
+  color: var(--muted); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-lg);
+  grid-column: 1 / -1; }
+.liveview-idle svg { width: 20px; height: 20px; flex: none; }
+
+.liveview-panel { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden;
+  background: var(--inset); }
+.lv-head { display: flex; align-items: baseline; gap: var(--s2); padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border); background: var(--raised); }
+.lv-who { font-weight: 600; font-size: 13px; }
+.lv-where { margin: 0; }
+/* The scaled stand-in for their window. A ground the cursor moves over — not a DOM mirror,
+   which would be fragile and is not what "where are they pointing" needs. */
+.lv-screen { position: relative; width: 100%; aspect-ratio: 16 / 9; background: var(--bg);
+  background-image: linear-gradient(var(--border) 1px, transparent 1px),
+                    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px; background-position: -1px -1px; opacity: .6; }
+.lv-cursor { position: absolute; width: 14px; height: 14px; margin: -3px 0 0 -3px; opacity: 0;
+  transition: left 140ms linear, top 140ms linear, opacity 200ms; pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
+/* A cursor arrow drawn in CSS, tinted to the accent so it reads against either theme. */
+.lv-cursor::before { content: ""; display: block; width: 0; height: 0;
+  border-left: 7px solid var(--accent); border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent; transform: rotate(45deg); }
+.lv-ripples { position: absolute; inset: 0; pointer-events: none; }
+.lv-ripple { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  border-radius: 50%; background: var(--accent); animation: lvRipple 620ms var(--ease) forwards; }
+@keyframes lvRipple {
+  from { transform: scale(.4); opacity: .8; }
+  to   { transform: scale(3.5); opacity: 0; }
+}
+.lv-field { padding: var(--s2) var(--s4) var(--s3); margin: 0; min-height: 1.4em; }
+
+/* The disclosure chip on the co-founder's side. Fixed, quiet, and permanent while watched —
+   the honesty of the whole feature lives in this staying put. */
+.watch-chip { position: fixed; bottom: var(--s5); left: var(--s5); z-index: 80;
+  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s4);
+  border-radius: var(--r-pill); font-size: 12.5px; font-weight: 500;
+  background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow-md);
+  animation: fadein var(--base) var(--ease) both; }
+.watch-chip svg { width: 14px; height: 14px; }
+@media (prefers-reduced-motion: reduce) { .lv-cursor { transition: opacity 200ms; } .lv-ripple { animation: none; } }

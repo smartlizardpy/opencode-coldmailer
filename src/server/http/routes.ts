@@ -17,6 +17,18 @@ import * as P from "../llm/prompts.ts";
 import { dashboardStats, localDay, toCsv, EXPORTS } from "../stats.ts";
 import { integrityReport, repairOrphans } from "../db/migrate.ts";
 import { DEFAULT_FOLLOWUPS, dueFollowUps, listSteps, seedDefaultSteps, setSteps, upcomingFollowUps } from "../queue/sequences.ts";
+import {
+  clearFailures, createInvite, listInvites, listSessions, recordFailure, redeemInvite,
+  revokeEverything, revokeInvite, revokeSession, revokeSessionByToken, sessionCookie,
+  clearedCookie, readCookie, SESSION_COOKIE, throttled,
+} from "./access.ts";
+import { install as installCloudflared, installHint, locateCloudflared } from "../tunnel/cloudflared.ts";
+import { auditSummary, listAudit } from "./audit.ts";
+import { isWatched, livePresence, markWatching, recordPresence } from "./presence.ts";
+import {
+  deleteCredential, getCompanyProfile, identityLine, listCredentials, profileComplete,
+  putCredential, setCompanyProfile, vaultKeyFile,
+} from "../vault.ts";
 
 const bad = (msg: string, code = "BAD_REQUEST", status = 400) => Object.assign(new Error(msg), { code, status });
 
@@ -49,25 +61,48 @@ export function registerRoutes(r: Router, app: AppContext): void {
   warmAudit(((getSetting(db, "smtp") ?? {}) as SmtpSettings).fromEmail ?? "");
 
   /* ------------------------------------------------------------- health */
-  r.get("/api/health", () => {
+  r.get("/api/health", ({ role }: RouteCtx) => {
     const slots = app.slots();
     const smtp = getSetting<SmtpSettings>(db, "smtp", {});
     const guards = sendGuards(db);
+    const owner = role === "owner";
     return {
       version: app.version,
-      opencode: {
-        status: app.supervisor.status, url: app.supervisor.url,
-        binPath: app.supervisor.binPath, stderrTail: app.supervisor.stderrTail.slice(-20),
-      },
-      model: {
-        research: { active: slots.research.active, status: slots.research.status, ranking: slots.research.ranking },
-        writing: { active: slots.writing.active, status: slots.writing.status, ranking: slots.writing.ranking },
-        probedAt: slots.probedAt,
-      },
+      role,
+      /* Redacted rather than omitted for the shared surface: the co-founder still needs to know
+         whether the machine is able to write and send, because that is what explains a stalled
+         queue. What they do not need is the path to a binary, the tail of a child process's
+         stderr, or which account this machine is signed in to. */
+      opencode: owner
+        ? { status: app.supervisor.status, url: app.supervisor.url,
+            binPath: app.supervisor.binPath, stderrTail: app.supervisor.stderrTail.slice(-20) }
+        : { status: app.supervisor.status },
+      model: owner
+        ? {
+            research: { active: slots.research.active, status: slots.research.status, ranking: slots.research.ranking },
+            writing: { active: slots.writing.active, status: slots.writing.status, ranking: slots.writing.ranking },
+            probedAt: slots.probedAt,
+          }
+        : {
+            research: { active: null, status: slots.research.status, ranking: [] },
+            writing: { active: null, status: slots.writing.status, ranking: [] },
+            probedAt: null,
+          },
       smtp: {
-        configured: !!smtp.configured, user: smtp.user ?? null,
-        lastVerifiedAt: smtp.lastVerifiedAt ?? null, lastError: smtp.lastError ?? null,
+        configured: !!smtp.configured,
+        user: owner ? (smtp.user ?? null) : null,
+        lastVerifiedAt: smtp.lastVerifiedAt ?? null,
+        lastError: owner ? (smtp.lastError ?? null) : null,
       },
+      share: owner
+        ? {
+            ...app.tunnel.state(),
+            sessions: listSessions(db).length,
+            // Signed in is not the same as here. The badge should count who is actually working.
+            online: listSessions(db).filter((s) => Date.now() - s.last_seen_at < 120_000).length,
+            invites: listInvites(db).filter((i) => !i.revoked_at).length,
+          }
+        : undefined,
       sending: { ...guards, running: app.sender.isRunning, lastOutcome: app.sender.lastOutcome, nextSendAt: app.sender.nextSendAt },
       review: { needsReview: (db.prepare("SELECT COUNT(*) c FROM email_draft WHERE status='needs_review'").get() as any).c },
       // The interview never asks who you are - it asks about your customers - so a user can
@@ -316,10 +351,23 @@ export function registerRoutes(r: Router, app: AppContext): void {
   r.post("/api/campaigns/:id/delete", ({ params, body }: RouteCtx) => {
     const c = db.prepare("SELECT name FROM campaign WHERE id=?").get(params.id) as { name: string } | undefined;
     if (!c) throw bad("campaign not found", "NOT_FOUND", 404);
-    if (String(body.confirm ?? "").trim() !== c.name) {
-      throw bad(`type the campaign name exactly ("${c.name}") to confirm`, "CONFIRM_REQUIRED");
-    }
     const sent = (db.prepare("SELECT COUNT(*) n FROM send_log WHERE campaign_id=? AND status='sent'").get(params.id) as any).n;
+    /*
+     * Typing the name is asked for only when there is something to lose.
+     *
+     * The gate was always there for one specific reason: the send log goes with the campaign,
+     * and the daily cap counts what is left, so deleting a campaign you have already sent from
+     * quietly frees capacity to send more today. A campaign that never sent anything has none
+     * of that - it is a bad first draft of a target, and making someone transcribe
+     * "Untitled campaign" to throw it away taught them to distrust the confirmation on the one
+     * that mattered.
+     */
+    if (sent > 0 && String(body.confirm ?? "").trim() !== c.name) {
+      throw bad(
+        `${c.name} has ${sent} sent email(s). Deleting it removes them from the send log, which is what the daily cap counts — type the campaign name exactly to confirm.`,
+        "CONFIRM_REQUIRED",
+      );
+    }
     const removed = tx(db, () => {
       const counts = {
         companies: (db.prepare("SELECT COUNT(*) n FROM campaign_company WHERE campaign_id=?").get(params.id) as any).n,
@@ -422,6 +470,46 @@ export function registerRoutes(r: Router, app: AppContext): void {
       priority: "interactive",
     });
     return r2.value;
+  });
+
+  /**
+   * Propose campaigns from the product brief.
+   *
+   * The blank New-campaign form is the hardest screen in the product: it asks for a KIND of
+   * organisation, and most people answer with a topic and then wonder why discovery came back
+   * full of the wrong thing. The brief already contains enough to name three real ones, and a
+   * suggestion you can read and reject is a better teacher than placeholder text.
+   */
+  r.post("/api/campaigns/suggest", async () => {
+    const product = db.prepare("SELECT * FROM product WHERE status='ready' ORDER BY id DESC LIMIT 1").get() as any;
+    if (!product) throw bad("finish the product interview first — there is nothing to base a suggestion on", "NO_PRODUCT");
+    const existing = (db.prepare("SELECT name, target_description FROM campaign ORDER BY id DESC LIMIT 8").all() as any[])
+      .map((c) => `${c.name}${c.target_description ? ` — ${c.target_description}` : ""}`);
+    const out = await app.llm.run<{ campaigns: Array<{ name: string; goal: string; target_description: string; relationship: string; why: string }> }>({
+      task: "campaign.reframe",
+      system: P.SUGGEST_SYSTEM,
+      prompt: P.suggestPrompt(briefOf(product), existing),
+      schema: P.SUGGEST_SCHEMA,
+      priority: "interactive",
+    });
+    return out.value;
+  });
+
+  /**
+   * Dry-run the targeting gate against one site, for a target that has not been saved yet.
+   *
+   * The campaign-scoped version below can only answer this once the campaign exists, which is
+   * after the decision it would have informed. This one takes the words straight out of the
+   * form, so a target can be corrected while it is still text in an input.
+   */
+  r.post("/api/campaigns/test-target", async ({ body }: RouteCtx) => {
+    const website = String(body.website ?? "").trim();
+    const target = String(body.target ?? "").trim();
+    if (!website) throw bad("enter a domain to test");
+    if (!target) throw bad("describe who you are looking for first");
+    return testTarget({ db, llm: app.llm, fetcher: app.fetcher }, null, website, {
+      target, floor: Number(body.min_fit_score ?? 45),
+    });
   });
 
   /** Dry-run the targeting gate against one site. Commits nothing. */
@@ -867,4 +955,205 @@ export function registerRoutes(r: Router, app: AppContext): void {
     `SELECT id,task,slot,provider_id,model_id,attempts,repaired,search_calls,ok,error_code,
        error_message,duration_ms,created_at,substr(response_text,1,600) response_text
      FROM llm_call ${query.get("failed") ? "WHERE ok=0" : ""} ORDER BY id DESC LIMIT 100`).all());
+
+  /* ------------------------------------------------------ your own company
+     Who is sending. Three columns on the product row used to be the only record of this, which
+     is enough to sign an email and not enough to identify a business - so the opt-out footer
+     that UK PECR expects had to be retyped by hand, and a footer people retype is a footer
+     people get wrong. Owner-only: it is set up once, on the machine, alongside the mailbox. */
+  r.get("/api/company", () => {
+    const profile = getCompanyProfile(db);
+    return { profile, complete: profileComplete(profile), identityLine: identityLine(profile) };
+  });
+
+  r.post("/api/company", ({ body }: RouteCtx) => {
+    const profile = setCompanyProfile(db, body ?? {});
+    return { profile, complete: profileComplete(profile), identityLine: identityLine(profile) };
+  });
+
+  /* ----------------------------------------------------------------- keys
+     Values are AES-256-GCM in the database under a key file outside it. Nothing here ever
+     returns a value: `listCredentials` does not even SELECT the ciphertext column, so a
+     careless spread into a response cannot leak one. */
+  r.get("/api/keys", () => ({
+    keys: listCredentials(db),
+    // Named so the Settings screen can say where the key lives rather than asserting "encrypted"
+    // and leaving the user to guess what that protects against.
+    vaultKeyFile: vaultKeyFile(),
+    smtp: { stored: !!(db.prepare("SELECT 1 FROM secret_ref WHERE name='smtp.password'").get()) },
+  }));
+
+  r.post("/api/keys", async ({ body }: RouteCtx) => {
+    const name = String(body.name ?? "").trim();
+    const value = String(body.value ?? "");
+    if (!name) throw bad("give the key a name");
+    if (!value.trim()) throw bad("paste the key's value");
+    const row = await putCredential(db, name, value, { label: body.label, kind: body.kind });
+    app.log(`stored key "${name}" (encrypted, ${vaultKeyFile()})`);
+    return row;
+  });
+
+  r.post("/api/keys/:name/delete", ({ params }: RouteCtx) => {
+    if (!deleteCredential(db, params.name)) throw bad("no such key", "NOT_FOUND", 404);
+    return { ok: true };
+  });
+
+  /* ---------------------------------------------------------------- share
+     Opening a tunnel gives this machine a public URL. It is never automatic and it never
+     survives the process, because a local-first tool that quietly acquires a public address
+     is a different product from the one on the tin. */
+  r.get("/api/share", async () => ({
+    tunnel: app.tunnel.state(),
+    cloudflared: { installed: !!(await locateCloudflared()), hint: installHint() },
+    invites: listInvites(db),
+    sessions: listSessions(db),
+  }));
+
+  r.post("/api/share/start", async () => {
+    if (!(await locateCloudflared())) {
+      throw bad(`cloudflared is not installed. Install it here, or with: ${installHint()}`, "NO_CLOUDFLARED");
+    }
+    const url = await app.tunnel.start(app.port());
+    app.log(`shared surface open at ${url}`);
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return app.tunnel.state();
+  });
+
+  r.post("/api/share/stop", async () => {
+    await app.tunnel.stop();
+    app.log("shared surface closed");
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return app.tunnel.state();
+  });
+
+  r.post("/api/share/install-cloudflared", () =>
+    background(app, "cloudflared", "Installing cloudflared", async () => {
+      await installCloudflared(app.log);
+      app.bus.emit("share:changed", app.tunnel.state(), true);
+      // Deliberately returns no path: a job result is broadcast to every connected client,
+      // including the shared surface, and a filesystem path on the owner's machine is not
+      // theirs to have. It is in the log and in `coldcall doctor`.
+      return { ok: true };
+    }));
+
+  /**
+   * Mint an invite. The token is returned exactly once and only ever stored as a SHA-256
+   * digest, so this response is the only chance to copy the link - and a stolen coldcall.db
+   * is not a working login to the tunnel.
+   */
+  r.post("/api/share/invite", ({ body }: RouteCtx) => {
+    const { invite, token } = createInvite(db, String(body.label ?? "").trim() || "Teammate");
+    const base = app.tunnel.url;
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return {
+      invite, token,
+      // The token rides in the fragment, which browsers do not send to the server and do not
+      // put in a Referer. It therefore never appears in an access log, ours or Cloudflare's.
+      link: base ? `${base}/#join=${token}` : null,
+      hint: base ? null : "Open the shared link first, then copy the invite.",
+    };
+  });
+
+  r.post("/api/share/invite/:id/revoke", ({ params }: RouteCtx) => {
+    const sessions = revokeInvite(db, params.id);
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return { ok: true, sessionsEnded: sessions };
+  });
+
+  r.post("/api/share/session/:id/revoke", ({ params }: RouteCtx) => {
+    if (!revokeSession(db, params.id)) throw bad("no such session", "NOT_FOUND", 404);
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return { ok: true };
+  });
+
+  /**
+   * What the shared surface has been doing.
+   *
+   * Owner-only, and the one screen that answers "who approved the one that bounced" - which the
+   * send log cannot, because every row in it says only that this machine sent it.
+   */
+  r.get("/api/share/activity", ({ query }: RouteCtx) => ({
+    summary: auditSummary(db),
+    sessions: listSessions(db),
+    tunnel: app.tunnel.state(),
+    presence: livePresence(),
+    entries: listAudit(db, {
+      limit: Number(query.get("limit")) || 200,
+      sessionId: query.get("session") ?? undefined,
+      failedOnly: query.get("failed") === "1",
+    }),
+  }));
+
+  /**
+   * The co-founder's page reporting its own cursor, clicks and current screen so the owner can
+   * watch live. Sender-allowed - it is their own activity, from their own page.
+   *
+   * The response tells them whether anyone is actually watching, which is how their "someone is
+   * watching" chip lights up. There is deliberately no field here for the text they typed: the
+   * point of a live cursor is to watch someone work, not to log their keystrokes.
+   */
+  r.post("/api/share/presence", ({ body, session, remote }: RouteCtx) => {
+    if (!remote || !session) return { watched: false };
+    const state = recordPresence(session.id, session.label, {
+      route: body?.route, cursor: body?.cursor, viewport: body?.viewport,
+      field: body?.field, clicks: body?.clicks,
+    });
+    app.bus.emit("share:presence", state, true);   // owner-only
+    return { watched: isWatched() };
+  });
+
+  /** The owner, on the Shared access screen, heartbeating "I am watching". Decays on its own. */
+  r.post("/api/share/watch", () => { markWatching(); return { ok: true }; });
+
+  /** The panic button: every invite and every session, gone, without closing the tunnel. */
+  r.post("/api/share/revoke-all", () => {
+    const counts = revokeEverything(db);
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return counts;
+  });
+
+  /**
+   * Who am I? Answered for both surfaces, and the shared one relies on it: an unauthenticated
+   * visitor gets `authenticated:false` rather than a 401, because the join screen is a normal
+   * part of the app rather than an error state.
+   */
+  r.get("/api/share/me", ({ role, remote, session }: RouteCtx) => ({
+    role: remote ? (session ? "sender" : null) : "owner",
+    authenticated: remote ? !!session : true,
+    surface: remote ? "shared" : "local",
+    label: session?.label ?? null,
+    expiresAt: session?.expires_at ?? null,
+    version: app.version,
+  }));
+
+  /**
+   * Redeem an invite for a session cookie.
+   *
+   * Throttled per address: 256 bits is not guessable, but an unthrottled endpoint on a public
+   * URL still lets someone try forever and fill the log while they do.
+   */
+  r.post("/api/share/redeem", ({ body, req, res, remote }: RouteCtx) => {
+    if (!remote) return { ok: true, alreadyOwner: true };
+    const who = String(req.socket.remoteAddress ?? "unknown");
+    if (throttled(who)) throw bad("too many attempts — wait ten minutes", "THROTTLED", 429);
+
+    const result = redeemInvite(db, String(body.token ?? ""), String(req.headers["user-agent"] ?? ""));
+    if (!result.ok) {
+      recordFailure(who);
+      app.log(`share: rejected an invite from ${who} (${result.error})`);
+      throw bad(result.error ?? "that invite link is not valid", "BAD_INVITE", 401);
+    }
+    clearFailures(who);
+    res.setHeader("set-cookie", sessionCookie(result.token!, result.maxAge!));
+    app.log("share: a teammate joined the shared surface");
+    app.bus.emit("share:changed", app.tunnel.state(), true);
+    return { ok: true, role: "sender" };
+  });
+
+  /** Sign out, from the teammate's side. */
+  r.post("/api/share/leave", ({ req, res, remote }: RouteCtx) => {
+    if (remote) revokeSessionByToken(db, readCookie(req.headers.cookie, SESSION_COOKIE));
+    res.setHeader("set-cookie", clearedCookie());
+    return { ok: true };
+  });
 }

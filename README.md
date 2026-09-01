@@ -3,8 +3,14 @@
 A local cold-email system that runs on your own machine and costs nothing to run.
 
 opencode does the thinking (free models, including web search). Your own mailbox does the sending,
-over SMTP with an app password. Everything — the database, the drafts, your credentials — stays on
-your machine. Nothing is uploaded anywhere and **no part of this product can generate a bill.**
+over SMTP with an app password. The database, the drafts and your credentials stay on your machine,
+and **no part of this product can generate a bill.**
+
+There are two ways in. The **local** one, on `127.0.0.1`, is yours: the mailbox, the keys, your
+company details, the models. The **shared** one is a link you can open for one other person — a
+co-founder who runs the campaigns and sends the mail — and it is the only thing here that leaves
+the machine. It is off by default, you open it by hand, and it closes when you close the app. See
+[Two surfaces](#two-surfaces).
 
 ## Install
 
@@ -63,10 +69,12 @@ checks:
 Both are recorded, so a rejection reads as *"not the target kind — looking for small local news
 website, this is a tennis academy"* rather than a silent disappearance.
 
-**Check one site first.** Under *Find companies* → *Check one site before running the whole
-campaign*, paste a domain and see the gate's reasoning in a single fetch. It commits nothing,
-and shares the page cache with the real crawl, so checking a site and then running it for real
-does not fetch it twice. Against the case this was built for:
+**Check one site first.** On the New campaign screen, and again under *Find companies* → *Check
+one site before running the whole campaign*, paste a domain and see the gate's reasoning in a
+single fetch. It commits nothing, and shares the page cache with the real crawl, so checking a
+site and then running it for real does not fetch it twice. The version on the New campaign screen
+runs against the words still sitting in the form — which is the moment a vague target is cheapest
+to fix, rather than after a run has been spent finding out. Against the case this was built for:
 
 | site | verdict | read as |
 |---|---|---|
@@ -100,10 +108,87 @@ A sidebar app shell, not a settings page with a send button.
 | **Replies** | Matched to their thread, classified, with a drafted response you can copy. Bounces and out-of-office replies are kept separate from people |
 | **Deliverability** | Whether your mail will be accepted at all: SPF, DKIM, DMARC and MX on your sending domain, each with what to do about it |
 | **Product** | The interview and the editable brief |
-| **Settings** | Models, mailbox, limits, never-contact list |
+| **Settings** | Your company, keys, models, mailbox, limits, never-contact list, and the shared link |
 | **Activity** | Every model call, including what a failed one returned |
 
 `⌘K` / `Ctrl K` opens a command palette. `?` lists the shortcuts.
+
+## Two surfaces
+
+Cold outreach is usually two jobs and often two people: someone sets the thing up, and someone
+sits with the queue. Those need very different amounts of access, and the second one does not
+need a laptop with your Gmail app password on it.
+
+**The local surface** is what you already have: `http://127.0.0.1:7788`, no password, because
+anything reaching it is already running as you on your own machine. It is where the mailbox, the
+keys, your company details, the model settings and the product interview live.
+
+**The shared surface** is a Cloudflare quick tunnel pointed at the same server. Settings → *Share
+with a teammate* → **Open the link** starts `cloudflared` and gives you a `*.trycloudflare.com`
+URL. On its own that URL gets nobody in: it shows a sign-in screen. You then create an **invite**,
+which is a link you send once.
+
+What the shared surface can do — the whole outreach loop:
+
+> set a campaign up, search for companies or paste a list, research them, read every draft with
+> its sources, approve, unapprove, edit, rewrite, send, start and pause sending, add someone to
+> the never-contact list, and work the replies.
+
+What it cannot do, enforced on the server and not in the UI:
+
+> read or change the mailbox, the app password, or any stored key · see your company details ·
+> change the models, the daily cap, the sending window or the opt-out footer · read the Activity
+> log, which quotes prompts and raw model output · edit the product brief · delete a campaign,
+> because that deletes the send log the daily cap is counted from · un-block an address someone
+> deliberately blocked · create or revoke invites.
+
+Sends still happen from your machine, through your mailbox, under your caps and your window.
+Nothing about handing someone the link changes who the mail comes from or how fast it goes out.
+
+**How it is held shut.** The server only answers two `Host` headers: the loopback, and the exact
+hostname the tunnel is currently answering on — so a closed tunnel is not a hostname anything will
+trust, and DNS rebinding has nothing to aim at. An invite is 256 bits and is stored only as a
+SHA-256 digest, so a copy of `coldcall.db` is not a login. Redeeming one sets an `HttpOnly`,
+`Secure`, `SameSite=Lax` session cookie; cross-site POSTs are refused by origin as well. Redemption
+is rate-limited per address. Revoking an invite signs out every device that used it, immediately,
+with no restart. The API is a positive allow-list, route by route: an endpoint added tomorrow is
+invisible to the shared link until someone adds it there on purpose.
+
+The invite token travels in the URL **fragment**, which browsers do not send to servers and do not
+put in a `Referer` — so it appears in no access log, ours or Cloudflare's, and the page strips it
+out of the address bar as soon as it is redeemed.
+
+**What it costs you.** Traffic goes through Cloudflare, which is a third party that did not exist
+in this product before you pressed the button, and a public URL is a public URL for as long as it
+is open. It is off by default for that reason, `coldcall doctor` says whether it is available, and
+closing the app closes it.
+
+```bash
+coldcall --share      # open the link at startup instead of clicking
+```
+
+`cloudflared` is not bundled. If you do not have it, the panel offers to fetch it into
+`~/.coldcall/bin`, or you can install it yourself (`brew install cloudflared` and friends).
+
+## Your company, and keys
+
+Two things the local surface sets up that used to have nowhere to live.
+
+**Your company.** Who is writing: your name and title, the trading and registered names, address,
+website, company and VAT numbers. The identity footer UK PECR expects is built from this rather
+than retyped into every campaign — *Use this as the opt-out footer* fills it in, and it is still
+off until you tick the box.
+
+**Keys.** Anything else this machine has to remember. Values are AES-256-GCM ciphertext in
+`coldcall.db`; the key that opens them is `~/.coldcall/vault.key`, mode 0600, deliberately outside
+the database — so `coldcall.db` stays what it has always been, a file that is safe to back up and
+safe to attach to a bug report. A stored value is never sent back to the browser, only its last
+four characters, which is enough to tell two keys apart and not enough to use one.
+
+Stated plainly, because a vault invites the wrong assumption: this does not stop another program
+running as you from reading both files. Nothing could, for an app that sends mail while you are
+asleep. What it buys is that the two have to be stolen together, and only one of them is the file
+people copy around.
 
 ## Finding a contact
 
@@ -238,6 +323,9 @@ You can see this in the UI: every draft has a **Sources** button showing the quo
   is the fastest way to be marked as spam, and nothing else would have caught it.
 - Add an opt-out footer, unless you switch it on in Settings. It's off by default.
 - Cost you anything. There are no paid APIs in this product, at all.
+- Open the shared link on its own. It is off by default, you press the button, and it closes when
+  coldcall does.
+- Let the shared link read a credential, change how this machine sends, or delete a send log.
 
 ## Sandboxing
 
@@ -258,6 +346,7 @@ npm run verify:sandbox
 | | |
 |---|---|
 | `coldcall` | Start the app and open the web UI |
+| `coldcall --share` | Start it and open the shared link straight away |
 | `coldcall doctor` | Report what is and is not working, then exit |
 | `coldcall repair` | Resolve references left dangling by an editor outside the app |
 | `coldcall where` | Print where your data lives |
@@ -280,6 +369,9 @@ coldcall 0.1.0
   ok    writing model          openai/gpt-5.6-terra-pro
   ok    research model         opencode/big-pickle
   ok    mailbox                you@gmail.com
+  ok    your company           Ozan at WearSide Labs
+  ok    keys                   2 stored, encrypted (/Users/you/.coldcall/vault.key)
+  ok    sharing                cloudflared at /Users/you/.coldcall/bin/cloudflared
 ```
 
 ## Scripts
@@ -295,8 +387,10 @@ coldcall 0.1.0
 
 ```
 ~/.coldcall/
-  coldcall.db      everything: companies, contacts, drafts, send log, replies
+  coldcall.db      everything: companies, contacts, drafts, send log, replies, encrypted keys
+  vault.key        opens the encrypted keys (mode 0600) - kept OUT of coldcall.db on purpose
   secrets.json     only if the macOS Keychain is unavailable (mode 0600)
+  bin/             cloudflared, if you let coldcall fetch it
   agent-cwd/       empty; opencode's working directory
   app/             the application itself
 ```

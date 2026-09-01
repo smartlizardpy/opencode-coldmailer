@@ -44,6 +44,10 @@ const dt = (ts) => ts ? new Intl.DateTimeFormat(undefined,
 
 const S = {
   route: "dashboard", campaign: null, health: null, stats: null,
+  /* Which surface this browser is on. "local" is the machine running coldcall and can do
+     everything; "shared" is a teammate on the tunnel URL. The server enforces this - what the
+     UI does with it is avoid offering buttons that would come back 403. */
+  surface: "local", role: "owner", sessionLabel: null,
   // When run:progress last wrote to the job bar, so the health poll does not overwrite it.
   lastProgressAt: 0,
   campaigns: [], companies: [], drafts: [], replies: [], product: null,
@@ -93,25 +97,33 @@ const hourOptions = (selected) => Array.from({ length: 24 }, (_, h) =>
 
 /* ───────────────────────────────────────────────────────── navigation */
 
+/* `shared: true` means the item also appears on the tunnel URL. Everything else is the
+   owner's: it either reads a credential, changes how this machine sends, or edits the brief
+   that every draft is written from. */
 const NAV = [
   { group: "Overview", items: [
-    { id: "dashboard", label: "Dashboard", icon: "view-grid" },
+    { id: "dashboard", label: "Dashboard", icon: "view-grid", shared: true },
   ]},
   { group: "Pipeline", items: [
-    { id: "campaigns", label: "Campaigns", icon: "binocular" },
-    { id: "review", label: "Review", icon: "page-edit", badge: "needsReview", tone: "attn" },
-    { id: "outbox", label: "Outbox", icon: "send", badge: "approvedWaiting" },
-    { id: "replies", label: "Replies", icon: "message-text", badge: "repliesUnhandled", tone: "attn" },
+    { id: "campaigns", label: "Campaigns", icon: "binocular", shared: true },
+    { id: "review", label: "Review", icon: "page-edit", badge: "needsReview", tone: "attn", shared: true },
+    { id: "outbox", label: "Outbox", icon: "send", badge: "approvedWaiting", shared: true },
+    { id: "replies", label: "Replies", icon: "message-text", badge: "repliesUnhandled", tone: "attn", shared: true },
   ]},
   { group: "Setup", items: [
     { id: "product", label: "Product", icon: "building" },
-    { id: "deliverability", label: "Deliverability", icon: "shield-check", badge: "deliverabilityIssues", tone: "attn" },
+    { id: "deliverability", label: "Deliverability", icon: "shield-check", badge: "deliverabilityIssues", tone: "attn", shared: true },
     { id: "settings", label: "Settings", icon: "settings" },
   ]},
   { group: "System", items: [
+    { id: "shared", label: "Shared access", icon: "user", badge: "sharedLive" },
     { id: "activity", label: "Activity", icon: "graph-up" },
   ]},
 ];
+
+const isOwner = () => S.role === "owner";
+/** Routes this surface may open at all. A hash link to Settings on the tunnel goes nowhere. */
+const canOpen = (route) => isOwner() || NAV.some((g) => g.items.some((i) => i.id === route && i.shared)) || route === "campaign-new";
 
 const TITLES = {
   dashboard: ["Dashboard", "What needs your attention, and whether anything is broken."],
@@ -123,11 +135,16 @@ const TITLES = {
   deliverability: ["Deliverability", "Whether your mail will be accepted before anyone decides whether to read it."],
   settings:  ["Settings", "Mailbox, models, sending limits and the never-contact list."],
   activity:  ["Activity", "Every model call, including the ones that failed and what they returned."],
+  "campaign-new": ["New campaign", "One kind of organisation, one ask. Both are worth getting right before anything is searched."],
+  shared:    ["Shared access", "Everything done through the shared link, on the machine it was done to."],
 };
 
 function renderNav() {
   const st = S.stats ?? {};
-  $("#nav").innerHTML = NAV.map((g) => `
+  const groups = NAV
+    .map((g) => ({ ...g, items: g.items.filter((it) => isOwner() || it.shared) }))
+    .filter((g) => g.items.length);
+  $("#nav").innerHTML = groups.map((g) => `
     <div>
       <div class="nav-group-title">${esc(g.group)}</div>
       ${g.items.map((it) => {
@@ -144,6 +161,13 @@ function renderNav() {
 
 function go(route, opts = {}) {
   if (!TITLES[route]) route = "dashboard";
+  // A hash link, a bookmark or a palette entry from the owner's machine can name a route this
+  // surface has no business opening. Send it home rather than rendering a screen whose every
+  // request will come back 403.
+  if (!canOpen(route)) route = "dashboard";
+  // Leaving the Shared access screen stops the watch heartbeat, so the co-founder's "someone is
+  // watching" note goes out within a few seconds rather than lingering after you look away.
+  if (S.route === "shared" && route !== "shared") stopWatchHeartbeat();
   S.route = route;
   S.selection.clear();
   if (opts.campaign) S.campaign = opts.campaign;
@@ -199,12 +223,16 @@ function cycleTheme() {
 
 function paletteCommands() {
   const cmds = [
-    ...Object.entries(TITLES).map(([id, [label]]) => ({
-      label: `Go to ${label}`, icon: "arrow-right", hint: "Navigate", run: () => go(id),
-    })),
-    { label: "New campaign", icon: "plus", hint: "Campaign", run: () => { go("campaigns"); setTimeout(() => $("#btnNewCampaign")?.click(), 60); } },
+    ...Object.entries(TITLES)
+      .filter(([id]) => id !== "campaign-new" && canOpen(id))
+      .map(([id, [label]]) => ({
+        label: `Go to ${label}`, icon: "arrow-right", hint: "Navigate", run: () => go(id),
+      })),
+    { label: "New campaign", icon: "plus", hint: "Campaign", run: () => go("campaign-new") },
     { label: "Check for replies now", icon: "refresh", hint: "Replies", run: async () => { await api("/api/replies/poll", {}); toast("Checking…"); } },
-    { label: "Re-probe models", icon: "refresh", hint: "Settings", run: async () => { await api("/api/models/probe", {}); toast("Probing…"); } },
+    ...(isOwner() ? [
+      { label: "Re-probe models", icon: "refresh", hint: "Settings", run: async () => { await api("/api/models/probe", {}); toast("Probing…"); } },
+    ] : []),
     { label: "Toggle theme", icon: "half-moon", hint: "View", run: cycleTheme },
     { label: "Collapse sidebar", icon: "menu", hint: "View", run: toggleCollapse },
   ];
@@ -352,6 +380,7 @@ async function render() {
     dashboard: renderDashboard, campaigns: renderCampaigns, review: renderReview,
     outbox: renderOutbox, replies: renderReplies, product: renderProduct,
     settings: renderSettings, activity: renderActivity, deliverability: renderDeliverability,
+    "campaign-new": renderNewCampaign, shared: renderShared,
   }[S.route];
   c.innerHTML = page(skeleton());
   try { await fn(); } catch (e) { fail(e); c.innerHTML = page(empty("warning-triangle", "Couldn't load this", e.message)); }
@@ -381,7 +410,9 @@ async function renderDashboard() {
     signed: !!health.identity?.signed,
     campaign: stats.campaigns > 0,
   };
-  const setupLeft = Object.values(setupDone).filter((v) => !v).length;
+  // Every item on this list is fixed in Settings or Product, neither of which the shared
+  // surface has. A checklist you cannot act on is just a list of things wrong with you.
+  const setupLeft = isOwner() ? Object.values(setupDone).filter((v) => !v).length : 0;
 
   const maxDay = Math.max(1, ...stats.sendsByDay.map((d) => d.sent + d.replies));
 
@@ -540,7 +571,7 @@ async function renderCampaigns() {
     $("#content").innerHTML = page(empty("binocular", "No campaigns yet",
       "A campaign is one audience and one ask. Describe who you want to reach and what you want from them.",
       `<button class="btn" id="btnNewCampaign">${icon("plus")} New campaign</button>`));
-    $("#btnNewCampaign").onclick = newCampaignDialog;
+    $("#btnNewCampaign").onclick = () => go("campaign-new");
     return;
   }
 
@@ -565,6 +596,7 @@ async function renderCampaigns() {
         </select>
         <button class="btn ghost sm" id="btnNewCampaign">${icon("plus")} New</button>
         <button class="btn ghost sm" id="btnCampSettings">${icon("settings")} Campaign settings</button>
+        ${isOwner() ? `<button class="btn ghost sm" id="btnDeleteCampaign" title="Delete this campaign">${icon("trash")}</button>` : ""}
         <span style="margin-left:auto" class="tag">${esc(camp.status)}</span>
       </div>
       ${camp.goal ? `<div class="card-note"><b>Ask:</b> ${esc(camp.goal)}</div>` : ""}
@@ -678,8 +710,9 @@ async function renderCampaigns() {
   `);
 
   $("#campSelect").onchange = (e) => { S.campaign = e.target.value; S.filter = ""; go("campaigns"); };
-  $("#btnNewCampaign").onclick = newCampaignDialog;
+  $("#btnNewCampaign").onclick = () => go("campaign-new");
   $("#btnCampSettings").onclick = () => campaignSettingsDialog(camp);
+  $("#btnDeleteCampaign")?.addEventListener("click", () => deleteCampaignDialog(camp));
   $$("[data-override]").forEach((b) => b.onclick = async () => {
     try {
       await api(`/api/companies/${b.dataset.override}/override`, {});
@@ -754,6 +787,7 @@ async function renderCampaigns() {
 }
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+function throttle(fn, ms) { let last = 0; return (...a) => { const n = Date.now(); if (n - last >= ms) { last = n; fn(...a); } }; }
 
 /* ───────────────────────────────────────────────────────── review */
 
@@ -815,9 +849,12 @@ async function renderReview() {
     ${unsigned ? `<div class="flagbox" style="margin-bottom:var(--s5)">
       ${icon("warning-triangle")} <b>These emails have no name at the bottom</b>
       <div>An unsigned message reads as automated, which is the one thing all this research is
-      avoiding. Add your name and business on the Product page — it applies to every draft you
-      have not sent yet, including the ones already written.
-      <button class="btn sm ghost" id="btnGoSign" style="margin-left:var(--s2)">Add it</button></div>
+      avoiding. ${isOwner()
+        ? `Add your name and business on the Product page — it applies to every draft you
+           have not sent yet, including the ones already written.
+           <button class="btn sm ghost" id="btnGoSign" style="margin-left:var(--s2)">Add it</button>`
+        : `The signature is set on the machine running coldcall — ask whoever set this up to add
+           it. It then applies to every draft not yet sent, including these.`}</div>
     </div>` : ""}
     ${S.drafts.length ? `<div class="review-layout">
       <div class="queue">
@@ -1320,10 +1357,176 @@ async function nextQuestion(answer) {
 
 /* ───────────────────────────────────────────────────────── settings */
 
+/**
+ * The share panel.
+ *
+ * Deliberately reads as a switch with consequences rather than a feature: it says what the
+ * link can do, what it cannot, and how to take it away. The URL is only useful with an invite,
+ * and the invite is only shown once - so the copy button matters more than it looks.
+ */
+function shareCard(share) {
+  if (!share) return "";
+  const t = share.tunnel ?? {};
+  const live = t.status === "ready" && !!t.url;
+  const invites = (share.invites ?? []).filter((i) => !i.revoked_at);
+  const sessions = share.sessions ?? [];
+
+  return `
+    <div class="card share-card" ${live ? 'data-live="1"' : ""}>
+      <div class="card-head"><h2>Share with a teammate</h2>
+        ${live ? `<span class="tag ok">${icon("check")} link open</span>`
+               : t.status === "starting" ? `<span class="tag warn">opening…</span>`
+               : `<span class="tag">closed</span>`}
+        <span class="card-actions">
+          ${live ? `<button class="btn ghost sm" id="btnShareStop">Close the link</button>`
+                 : `<button class="btn sm" id="btnShareStart" ${share.cloudflared.installed ? "" : "disabled"}>${icon("globe")} Open the link</button>`}
+        </span>
+      </div>
+
+      <p class="card-note" style="margin-top:0">Opens a Cloudflare tunnel to this machine and
+        gives you a public URL. Whoever holds it, plus an invite, can set campaigns up, research
+        companies, read the drafts, approve them and watch the replies. They cannot see your
+        mailbox, your app password, your keys or your model settings, and they cannot change how
+        this machine sends. It closes when coldcall stops.</p>
+
+      ${!share.cloudflared.installed ? `
+        <div class="share-install">
+          <div>
+            <b>cloudflared isn't installed.</b>
+            <div class="cellsub">It's Cloudflare's tunnel client. coldcall can fetch it into
+              <code class="mono">~/.coldcall/bin</code>, or install it yourself with
+              <code class="mono">${esc(share.cloudflared.hint)}</code>.</div>
+          </div>
+          <button class="btn ghost sm" id="btnInstallCf">${icon("download")} Get it</button>
+        </div>` : ""}
+
+      ${t.status === "failed" && t.error ? `
+        <div class="flagbox" data-sev="critical" style="margin-top:var(--s4)">
+          <b>The tunnel stopped.</b> ${esc(t.error)}</div>` : ""}
+
+      ${live ? `
+        <div class="share-url">
+          <span class="rf-label">Link</span>
+          <a class="mono" href="${esc(t.url)}" target="_blank" rel="noreferrer">${esc(t.url)}</a>
+          <button class="btn ghost sm" data-copy="${esc(t.url)}">Copy</button>
+        </div>
+        <p class="card-note">On its own this URL gets nobody in — it shows a sign-in screen.
+          Send an invite as well.</p>` : ""}
+
+      <div class="share-people">
+        <div class="share-people-head">
+          <b>Invites</b>
+          <button class="btn ghost sm" id="btnInvite">${icon("plus")} Create an invite</button>
+        </div>
+        ${invites.length ? `<ul class="share-list">${invites.map((i) => `
+          <li>
+            <span>${esc(i.label)}</span>
+            <span class="cellsub">${i.uses ? `used ${num(i.uses)}×` : "not used yet"}${
+              i.expires_at ? ` · expires ${esc(when(i.expires_at))}` : ""}</span>
+            <button class="btn sm ghost" data-revinvite="${esc(i.id)}">Revoke</button>
+          </li>`).join("")}</ul>`
+          : `<p class="card-note">None yet. An invite is a one-time code; revoking it signs out
+             every device that used it.</p>`}
+
+        <div class="share-people-head" style="margin-top:var(--s4)">
+          <b>Signed in</b>
+          ${sessions.length ? `<button class="btn ghost sm" id="btnRevokeAll">Sign everyone out</button>` : ""}
+        </div>
+        ${sessions.length ? `<ul class="share-list">${sessions.map((x) => `
+          <li>
+            <span>${esc(x.label || "Teammate")}</span>
+            <span class="cellsub">${esc(shortAgent(x.user_agent))} · last seen ${esc(ago(x.last_seen_at))}</span>
+            <button class="btn sm ghost" data-revsession="${esc(x.id)}">Sign out</button>
+          </li>`).join("")}</ul>`
+          : `<p class="card-note">Nobody is signed in.</p>`}
+      </div>
+    </div>`;
+}
+
+/**
+ * Report this shared-surface tab's cursor, clicks and current screen so the owner can watch it
+ * live. Runs only on the shared surface, only for a signed-in teammate.
+ *
+ * What it sends: where the pointer is (as a fraction of the window, so it renders at any size),
+ * clicks, the current screen, and the LABEL of whatever field is focused. What it never sends:
+ * the characters typed into that field. Watching a cursor move is co-browsing; capturing
+ * keystrokes is a keylogger, and the line between them is that this function has nowhere to put
+ * the text even if it wanted to.
+ *
+ * And it is not quiet: the response says whether anyone is watching, and when they are, a chip
+ * says so. That is deliberate and not switch-off-able — a hidden version of this is the thing it
+ * is written specifically not to be.
+ */
+function startPresenceReporting() {
+  let cursor = null, clicks = [], field = "", dirty = false;
+
+  const fieldLabel = (el) => {
+    if (!el || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return "";
+    if (el.type === "password") return "a password field";      // never even name it beyond this
+    const lab = el.closest("label")?.textContent?.trim()
+      || el.getAttribute("aria-label")
+      || el.getAttribute("placeholder")
+      || el.id || "a field";
+    return String(lab).replace(/\s+/g, " ").slice(0, 50);
+  };
+
+  addEventListener("mousemove", throttle((e) => {
+    cursor = { x: e.clientX / innerWidth, y: e.clientY / innerHeight }; dirty = true;
+  }, 60), { passive: true });
+  addEventListener("click", (e) => {
+    clicks.push({ x: e.clientX / innerWidth, y: e.clientY / innerHeight }); dirty = true;
+  }, true);
+  addEventListener("scroll", throttle(() => { dirty = true; }, 200), { passive: true, capture: true });
+  document.addEventListener("focusin", (e) => { field = fieldLabel(e.target); dirty = true; }, true);
+  document.addEventListener("focusout", () => { field = ""; dirty = true; }, true);
+
+  const flush = async (force) => {
+    if (!dirty && !force) return;
+    dirty = false;
+    const batch = { route: S.route, cursor, viewport: { w: innerWidth, h: innerHeight }, field, clicks };
+    clicks = [];
+    try {
+      const r = await api("/api/share/presence", batch);
+      setWatchedChip(!!r.watched);
+    } catch { /* a dropped presence ping is nothing to bother anyone about */ }
+  };
+  // A quick cadence while something is changing, and a slow heartbeat so the "being watched"
+  // chip is still current when the co-founder is sitting still reading.
+  setInterval(() => flush(false), 150);
+  setInterval(() => flush(true), 2500);
+}
+
+/** The disclosure. Present whenever the owner is actually watching this tab, and not dismissable. */
+function setWatchedChip(on) {
+  let chip = $("#watchChip");
+  if (!on) { chip?.remove(); return; }
+  if (chip) return;
+  chip = document.createElement("div");
+  chip.id = "watchChip";
+  chip.className = "watch-chip";
+  chip.innerHTML = `${icon("eye")} <span>The owner is watching this screen</span>`;
+  chip.title = "The person whose machine this runs on can see your cursor, clicks and which "
+    + "field you are in — live. They cannot see what you type into it.";
+  document.body.append(chip);
+}
+
+/** "Chrome on macOS" beats 180 characters of version numbers in a list of devices. */
+function shortAgent(ua = "") {
+  const os = /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iOS"
+    : /Mac OS X/i.test(ua) ? "macOS" : /Windows/i.test(ua) ? "Windows"
+    : /Linux/i.test(ua) ? "Linux" : "";
+  const br = /Edg\//i.test(ua) ? "Edge" : /OPR\//i.test(ua) ? "Opera"
+    : /Chrome\//i.test(ua) ? "Chrome" : /Safari\//i.test(ua) ? "Safari"
+    : /Firefox\//i.test(ua) ? "Firefox" : "a browser";
+  return os ? `${br} on ${os}` : br;
+}
+
 async function renderSettings() {
-  const [s, health, sup, integrity] = await Promise.all([
+  const [s, health, sup, integrity, company, keys, share] = await Promise.all([
     api("/api/settings"), api("/api/health"), api("/api/suppression"),
     api("/api/integrity").catch(() => ({ ok: true, violations: [] })),
+    api("/api/company"), api("/api/keys"),
+    api("/api/share").catch(() => null),
   ]);
   const m = s.smtp ?? {}, g = s.sending ?? {};
   const win = g.window ?? { enabled: false, startHour: 9, endHour: 17, days: [1, 2, 3, 4, 5] };
@@ -1352,6 +1555,64 @@ async function renderSettings() {
       <p class="card-note">Web search is only offered to the free <code class="mono">opencode/*</code>
         models — that's how opencode gates it — so research runs free and your own provider does
         the writing. If neither is ready, run <code class="mono">opencode auth login</code> in a terminal.</p>
+    </div>
+
+    ${shareCard(share)}
+
+    <div class="card">
+      <div class="card-head"><h2>Your company</h2>
+        ${company.complete ? `<span class="tag ok">${icon("check")} set up</span>` : `<span class="tag warn">incomplete</span>`}</div>
+      <p class="card-note" style="margin-top:0">Who is writing. This is what the opt-out footer
+        identifies you as, and UK PECR expects a cold B2B email to carry it — so it is filled in
+        once here rather than retyped into every campaign.</p>
+      <div class="grid2" style="margin-top:var(--s4)">
+        <label class="field">Your name<input id="cpSenderName" value="${esc(company.profile.sender_name)}" placeholder="Ozan Kaygusuz"></label>
+        <label class="field">Your title<input id="cpSenderTitle" value="${esc(company.profile.sender_title)}" placeholder="founder"></label>
+        <label class="field">Trading name<input id="cpTrading" value="${esc(company.profile.trading_name)}" placeholder="WearSide Labs"></label>
+        <label class="field">Registered name<input id="cpLegal" value="${esc(company.profile.legal_name)}" placeholder="WearSide Labs Ltd"></label>
+        <label class="field">Website<input id="cpWebsite" value="${esc(company.profile.website)}" placeholder="wearsidelabs.com"></label>
+        <label class="field">Reply-to address<input id="cpEmail" type="email" value="${esc(company.profile.contact_email)}" placeholder="ozan@wearsidelabs.com"></label>
+        <label class="field">Phone<input id="cpPhone" value="${esc(company.profile.phone)}" placeholder="optional"></label>
+        <label class="field">Address<input id="cpAddress" value="${esc(company.profile.address)}" placeholder="Durham"></label>
+        <label class="field">Country<input id="cpCountry" value="${esc(company.profile.country)}" placeholder="UK"></label>
+        <label class="field">Company number<input id="cpCompanyNo" value="${esc(company.profile.company_number)}" placeholder="optional"></label>
+        <label class="field">VAT number<input id="cpVat" value="${esc(company.profile.vat_number)}" placeholder="optional"></label>
+      </div>
+      ${company.identityLine ? `<div class="identity-preview">
+        <span class="rf-label">Reads as</span><span class="mono">${esc(company.identityLine)}</span></div>` : ""}
+      <div class="row" style="margin-top:var(--s4)">
+        <button class="btn ghost" id="btnSaveCompany">Save company details</button>
+        ${company.identityLine ? `<button class="btn ghost sm" id="btnUseAsFooter">Use this as the opt-out footer</button>` : ""}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Keys</h2><span class="tag">${num(keys.keys.length)}</span></div>
+      <p class="card-note" style="margin-top:0">Anything else this machine needs to remember.
+        Values are encrypted with AES-256-GCM and the key that opens them is
+        <code class="mono">${esc(keys.vaultKeyFile)}</code> — outside the database, so
+        <code class="mono">coldcall.db</code> stays safe to back up and safe to attach to a bug
+        report. It does not stop another program running as you from reading both files;
+        nothing could, for an app that sends mail while you are asleep.</p>
+      ${keys.keys.length ? `<div class="tablewrap" style="margin-top:var(--s4)"><table>
+        <thead><tr><th>Name</th><th style="width:140px">Value</th><th style="width:120px">Last used</th><th style="width:80px"></th></tr></thead>
+        <tbody>${keys.keys.map((k) => `<tr>
+          <td><div class="cellmain mono">${esc(k.name)}</div>
+              ${k.label && k.label !== k.name ? `<div class="cellsub">${esc(k.label)}</div>` : ""}</td>
+          <td class="mono cellsub">${esc(k.hint)}</td>
+          <td class="cellsub">${k.last_used_at ? esc(ago(k.last_used_at)) : "never"}</td>
+          <td><button class="btn sm ghost" data-delkey="${esc(k.name)}">Remove</button></td></tr>`).join("")}
+        </tbody></table></div>` : ""}
+      <div class="grid3" style="margin-top:var(--s4)">
+        <label class="field">Name<input id="keyName" placeholder="provider.api_key" autocomplete="off"></label>
+        <label class="field">Value<input id="keyValue" type="password" placeholder="paste it here" autocomplete="off"></label>
+        <label class="field">Kind<select id="keyKind">
+          <option value="api_key">API key</option><option value="token">Token</option>
+          <option value="password">Password</option><option value="other">Other</option></select></label>
+      </div>
+      <div class="row" style="margin-top:var(--s3)"><button class="btn ghost" id="btnAddKey">${icon("plus")} Store key</button></div>
+      <p class="card-note">A stored key is never sent back to this page — only its last four
+        characters, which is enough to tell two keys apart and not enough to use one.</p>
     </div>
 
     <div class="card">
@@ -1439,6 +1700,95 @@ async function renderSettings() {
         </tbody></table></div>` : ""}
     </div>
   `);
+
+  /* ------------------------------------------------------------------ share */
+  const reload = () => renderSettings().catch(fail);
+  $("#btnShareStart")?.addEventListener("click", async (e) => {
+    const b = e.target.closest("button");
+    b.disabled = true; b.innerHTML = `<span class="spinner"></span> Opening…`;
+    try { const t = await api("/api/share/start", {}); toast(`Shared link open at ${t.url}`); }
+    catch (err) { fail(err); }
+    reload();
+  });
+  $("#btnShareStop")?.addEventListener("click", async () => {
+    if (!confirm("Close the shared link?\n\nThe URL stops working immediately. Invites and signed-in devices are kept, so re-opening later gives everyone access again without re-inviting.")) return;
+    try { await api("/api/share/stop", {}); toast("Shared link closed"); } catch (e) { fail(e); }
+    reload();
+  });
+  $("#btnInstallCf")?.addEventListener("click", async (e) => {
+    e.target.closest("button").disabled = true;
+    try { await api("/api/share/install-cloudflared", {}); toast("Downloading cloudflared…"); }
+    catch (err) { fail(err); reload(); }
+  });
+  $("#btnInvite")?.addEventListener("click", () => inviteDialog(reload));
+  $$("[data-revinvite]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Revoke this invite?\n\nAnyone who joined with it is signed out immediately.")) return;
+    try {
+      const r = await api(`/api/share/invite/${b.dataset.revinvite}/revoke`, {});
+      toast(r.sessionsEnded ? `Revoked — ${r.sessionsEnded} device(s) signed out` : "Revoked");
+    } catch (e) { fail(e); }
+    reload();
+  });
+  $$("[data-revsession]").forEach((b) => b.onclick = async () => {
+    try { await api(`/api/share/session/${b.dataset.revsession}/revoke`, {}); toast("Signed out"); }
+    catch (e) { fail(e); }
+    reload();
+  });
+  $("#btnRevokeAll")?.addEventListener("click", async () => {
+    if (!confirm("Sign everyone out and revoke every invite?\n\nThe link stays open but nobody can get in until you create a new invite.")) return;
+    try { const r = await api("/api/share/revoke-all", {}); toast(`${r.sessions} signed out, ${r.invites} invite(s) revoked`); }
+    catch (e) { fail(e); }
+    reload();
+  });
+  $$("[data-copy]").forEach((b) => b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
+    catch { toast("Couldn't copy — select it and copy by hand", true); }
+  });
+
+  /* -------------------------------------------------------------- company */
+  $("#btnSaveCompany")?.addEventListener("click", async (e) => {
+    const b = e.target.closest("button"); b.disabled = true;
+    try {
+      await api("/api/company", {
+        sender_name: $("#cpSenderName").value.trim(), sender_title: $("#cpSenderTitle").value.trim(),
+        trading_name: $("#cpTrading").value.trim(), legal_name: $("#cpLegal").value.trim(),
+        website: $("#cpWebsite").value.trim(), contact_email: $("#cpEmail").value.trim(),
+        phone: $("#cpPhone").value.trim(), address: $("#cpAddress").value.trim(),
+        country: $("#cpCountry").value.trim(), company_number: $("#cpCompanyNo").value.trim(),
+        vat_number: $("#cpVat").value.trim(),
+      });
+      toast("Company details saved");
+    } catch (err) { fail(err); }
+    reload();
+  });
+  $("#btnUseAsFooter")?.addEventListener("click", async () => {
+    const line = $(".identity-preview .mono")?.textContent ?? "";
+    if (!line) return;
+    const text = `${line}. Reply "no thanks" and I won't write again.`;
+    $("#footerText").value = text;
+    $("#footerEnabled").checked = true;
+    try {
+      await api("/api/settings", { sending: { footerEnabled: true, footerText: text } });
+      toast("Footer set from your company details");
+    } catch (e) { fail(e); }
+  });
+
+  /* ----------------------------------------------------------------- keys */
+  $("#btnAddKey")?.addEventListener("click", async (e) => {
+    const name = $("#keyName").value.trim(), value = $("#keyValue").value;
+    if (!name) return toast("Give the key a name", true);
+    if (!value.trim()) return toast("Paste the key's value", true);
+    e.target.closest("button").disabled = true;
+    try { await api("/api/keys", { name, value, kind: $("#keyKind").value }); toast(`Stored ${name}`); }
+    catch (err) { fail(err); }
+    reload();
+  });
+  $$("[data-delkey]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Remove "${b.dataset.delkey}"?\n\nThe value is deleted and cannot be recovered from here.`)) return;
+    try { await api(`/api/keys/${encodeURIComponent(b.dataset.delkey)}/delete`, {}); toast("Removed"); }
+    catch (e) { fail(e); }
+    reload();
+  });
 
   $("#btnRepair")?.addEventListener("click", async () => {
     if (!confirm("Resolve references that point at something no longer in the database?\n\nRows whose reference is optional are kept and the reference cleared; only genuinely unreachable rows are deleted. This cannot be undone.")) return;
@@ -1586,10 +1936,13 @@ async function renderDeliverability(refresh = false) {
   S.stats = stats;
 
   if (!audit.domain) {
-    $("#content").innerHTML = page(empty("shield-check", "No sending address yet",
-      "Set your from address in Settings and this page will audit the domain you send from.",
-      `<button class="btn" id="toSettings">Open settings</button>`));
-    $("#toSettings").onclick = () => go("settings");
+    $("#content").innerHTML = page(isOwner()
+      ? empty("shield-check", "No sending address yet",
+          "Set your from address in Settings and this page will audit the domain you send from.",
+          `<button class="btn" id="toSettings">Open settings</button>`)
+      : empty("shield-check", "No sending address yet",
+          "The mailbox hasn't been connected on the machine running coldcall, so there is no domain to audit yet."));
+    $("#toSettings")?.addEventListener("click", () => go("settings"));
     return;
   }
 
@@ -1653,76 +2006,290 @@ function modal(title, bodyHtml, onConfirm, confirmLabel = "Save") {
   $("#modalBody").querySelector("input,textarea,select")?.focus();
   $("#mOk").onclick = async () => {
     const b = $("#mOk"); b.disabled = true; b.innerHTML = `<span class="spinner"></span>`;
-    try { await onConfirm(); close(); } catch (e) { fail(e); b.disabled = false; b.textContent = confirmLabel; }
+    try {
+      // A handler returning "keep-open" has replaced the dialog's own contents and is showing
+      // something that cannot be shown twice - an invite link, say. Closing on success would
+      // throw that away in the instant it appeared.
+      if (await onConfirm() !== "keep-open") close();
+    } catch (e) { fail(e); b.disabled = false; b.textContent = confirmLabel; }
   };
   document.addEventListener("keydown", function esckey(e) {
     if (e.key === "Escape") { close(); document.removeEventListener("keydown", esckey); }
   });
 }
 
-function newCampaignDialog() {
-  modal("New campaign", `
-    <label class="field">Name<input id="cName" placeholder="Durham trades" autofocus></label>
-    <label class="field" style="margin-top:var(--s3)">What do you want from this email?
-      <input id="cGoal" placeholder="15 minutes to talk about rebuilding their website"></label>
-    <label class="field" style="margin-top:var(--s3)">Who are you looking for?
-      <textarea id="cTarget" rows="3" placeholder="e.g. small independent local news websites that publish sports coverage — not clubs or academies"></textarea></label>
-    <p class="card-note" style="margin-top:var(--s2)">Be specific about the <b>kind</b> of
-      organisation. This is what discovery filters on, and it's how a search for news sites
-      avoids coming back full of sports clubs.</p>
-    <div class="row" style="margin-top:var(--s3)">
-      <button type="button" class="btn ghost sm" id="btnReframe">${icon("sparks")} Tidy this up</button>
-      <span class="card-note" style="margin:0">Write it however it comes out — mixed languages,
-        half a sentence. This rewrites it into the two fields the search actually uses.</span>
-    </div>
-    <div id="reframeOut"></div>
-    <div class="grid2" style="margin-top:var(--s4)">
-      <label class="field">How to find them<select id="cMode">
-        <option value="opencode_search">Search the web (free)</option>
-        <option value="manual">I'll paste a list</option></select></label>
-      <label class="field">People per company<input id="cContacts" type="number" min="1" max="5" value="3"></label>
-    </div>
-    <label class="check" style="margin-top:var(--s3)">
-      <input type="checkbox" id="cInferred"> Allow guessed addresses (first.last@) when nobody publishes one</label>`,
-    async () => {
-      const c = await api("/api/campaigns", {
-        name: $("#cName").value.trim() || "Untitled campaign",
-        goal: $("#cGoal").value.trim(), target_description: $("#cTarget").value.trim(),
-        discovery_mode: $("#cMode").value, contacts_per_company: +$("#cContacts").value,
-        allow_inferred_emails: $("#cInferred").checked,
-      });
-      S.campaign = c.id; toast("Campaign created"); go("campaigns");
-    }, "Create");
+/* ─────────────────────────────────────────────── new campaign (its own screen)
 
-  wireReframe();
+   This was a modal, and it was the wrong container for it. The form asks for the single
+   hardest thing in the product - the KIND of organisation to look for - then buries that
+   question between a name field and a number input, in a box that scrolls. Two of the three
+   things that help you answer it (a suggestion drawn from your own brief, and a dry run of the
+   gate against a real site) had nowhere to go, so neither existed at the moment they were
+   needed: before the campaign was created.
+
+   So it is a screen. The question that matters is first and largest, the AI help sits next to
+   the field it helps with rather than under a "Tidy this up" afterthought, and the right rail
+   reads the campaign back as a sentence while you type - because the failure this is guarding
+   against is someone writing a topic where a kind belongs and not noticing. */
+
+const BLANK_CAMPAIGN = { name: "", goal: "", target: "", mode: "opencode_search", contacts: 3, inferred: false };
+
+const DISCOVERY_MODES = [
+  ["opencode_search", "search", "Search the web", "Free, via opencode. Every result is put through the targeting gate below."],
+  ["manual", "list", "I'll paste a list", "Domains from a spreadsheet or a CSV. Still researched, still gated."],
+];
+
+async function renderNewCampaign() {
+  const d = S.newCampaign ?? (S.newCampaign = { ...BLANK_CAMPAIGN });
+
+  $("#content").innerHTML = page(`
+    <div class="wizard">
+      <div class="wizard-main">
+
+        <div class="aihelp" id="aiHelp">
+          <div class="aihelp-text">
+            <b>${icon("sparks")} Not sure who to aim at?</b>
+            <span>Read your product brief and propose three campaigns aimed at genuinely
+              different kinds of organisation — usually a customer, a partner and someone who
+              writes about you. Nothing is applied until you pick one.</span>
+          </div>
+          <button type="button" class="btn" id="btnSuggest">Suggest campaigns</button>
+        </div>
+        <div id="suggestOut"></div>
+
+        <section class="step">
+          <div class="step-head">
+            <span class="step-n">1</span>
+            <div>
+              <h2>Who are you looking for?</h2>
+              <p class="step-sub">Name the <b>kind</b> of organisation, not the subject. This is
+                the one field discovery filters on, and the difference between "local news" and
+                "small independent local news websites" is the difference between a list of news
+                sites and a list of anything that mentions the town.</p>
+            </div>
+          </div>
+          <textarea id="cTarget" rows="4" aria-label="Who you are looking for"
+            placeholder="small independent local news websites that publish sports coverage — not clubs or academies">${esc(d.target)}</textarea>
+          <div class="step-tools">
+            <button type="button" class="btn ghost sm" id="btnReframe">${icon("sparks")} Tidy this up</button>
+            <span class="cellsub">Write it however it comes out — mixed languages, half a
+              sentence. This splits it into the fields the search actually uses and tells you
+              what it changed.</span>
+          </div>
+          <div id="reframeOut"></div>
+        </section>
+
+        <section class="step">
+          <div class="step-head">
+            <span class="step-n">2</span>
+            <div>
+              <h2>What do you want from the email?</h2>
+              <p class="step-sub">The ask, in one line — and something a stranger could say yes
+                to in a single reply. "Explore a partnership" is not a first ask; "fifteen
+                minutes on Thursday" is.</p>
+            </div>
+          </div>
+          <input id="cGoal" aria-label="What you want from the email"
+            placeholder="15 minutes to talk about rebuilding their website" value="${esc(d.goal)}">
+        </section>
+
+        <section class="step">
+          <div class="step-head">
+            <span class="step-n">3</span>
+            <div>
+              <h2>What should it be called?</h2>
+              <p class="step-sub">Only you will ever see this.</p>
+            </div>
+          </div>
+          <input id="cName" aria-label="Campaign name" placeholder="Durham trades" value="${esc(d.name)}">
+        </section>
+
+        <section class="step">
+          <div class="step-head">
+            <span class="step-n">4</span>
+            <div>
+              <h2>How should it find them?</h2>
+              <p class="step-sub">Either way, nothing is researched until you tick it, and
+                nothing is sent until you approve it.</p>
+            </div>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="How to find companies">
+            ${DISCOVERY_MODES.map(([v, ic, label, note]) => `
+              <button type="button" class="seg-opt" role="radio" data-mode="${v}"
+                aria-checked="${d.mode === v}">
+                ${icon(ic)}
+                <span class="seg-label">${esc(label)}</span>
+                <span class="seg-note">${esc(note)}</span>
+              </button>`).join("")}
+          </div>
+          <div class="grid2 step-grid">
+            <label class="field">People per company
+              <input id="cContacts" type="number" min="1" max="5" value="${esc(d.contacts)}"></label>
+            <label class="check step-check">
+              <input type="checkbox" id="cInferred" ${d.inferred ? "checked" : ""}>
+              <span>Allow guessed addresses<span class="cellsub">first.last@ patterns, when a
+                company publishes none. Off is the safer default — a guess that bounces costs
+                you sending reputation.</span></span></label>
+          </div>
+        </section>
+      </div>
+
+      <aside class="wizard-aside">
+        <div class="card summary" id="summary"></div>
+
+        <div class="card gate">
+          <div class="card-head"><h2>${icon("shield-search")} Try it on a real site</h2></div>
+          <p class="card-note" style="margin-top:0">Runs the targeting gate against one domain
+            and shows its reasoning, before this campaign exists. One fetch, nothing saved — and
+            the page is cached, so running the campaign later does not fetch it twice.</p>
+          <div class="row" style="margin-top:var(--s3)">
+            <input id="gateDomain" aria-label="Domain to check" placeholder="thenorthernecho.co.uk" style="flex:1;min-width:0">
+            <button class="btn ghost sm" id="btnGate">Check</button>
+          </div>
+          <div id="gateOut"></div>
+        </div>
+      </aside>
+    </div>`,
+    `<button class="btn ghost" id="btnCancelCampaign">Cancel</button>
+     <button class="btn" id="btnCreateCampaign">${icon("check")} Create campaign</button>`);
+
+  /* Reading the fields back rather than tracking them keeps one source of truth: whatever is
+     on screen is what gets created, including anything the AI help wrote into an input. */
+  const read = () => ({
+    name: $("#cName").value.trim(),
+    goal: $("#cGoal").value.trim(),
+    target: $("#cTarget").value.trim(),
+    mode: $$(".seg-opt").find((b) => b.getAttribute("aria-checked") === "true")?.dataset.mode ?? "opencode_search",
+    contacts: Math.min(5, Math.max(1, +$("#cContacts").value || 3)),
+    inferred: $("#cInferred").checked,
+  });
+
+  const drawSummary = () => {
+    const v = read();
+    Object.assign(S.newCampaign, v);
+    $("#summary").innerHTML = `
+      <div class="card-head"><h2>This campaign will</h2></div>
+      <dl class="summary-list">
+        <dt>Look for</dt>
+        <dd class="${v.target ? "" : "unset"}">${v.target ? esc(v.target) : "— nothing yet, and this is the one that matters"}</dd>
+        <dt>Ask them for</dt>
+        <dd class="${v.goal ? "" : "unset"}">${v.goal ? esc(v.goal) : "— not set"}</dd>
+        <dt>Find them by</dt>
+        <dd>${v.mode === "manual" ? "a list you paste" : "searching the web"}</dd>
+        <dt>Contact</dt>
+        <dd>up to ${num(v.contacts)} ${v.contacts === 1 ? "person" : "people"} per company${
+          v.inferred ? ", guessing an address if none is published" : ", only published addresses"}</dd>
+      </dl>
+      <p class="card-note">Creating it researches nothing and sends nothing. You pick the
+        companies afterwards, and every draft still waits for you.</p>`;
+  };
+  drawSummary();
+
+  $$("#content input, #content textarea").forEach((el) => el.addEventListener("input", debounce(drawSummary, 150)));
+  $("#cInferred").onchange = drawSummary;
+  $$(".seg-opt").forEach((b) => b.onclick = () => {
+    $$(".seg-opt").forEach((o) => o.setAttribute("aria-checked", String(o === b)));
+    drawSummary();
+  });
+
+  $("#btnCancelCampaign").onclick = () => { S.newCampaign = null; go("campaigns"); };
+
+  $("#btnCreateCampaign").onclick = async (e) => {
+    const v = read();
+    if (!v.target) {
+      $("#cTarget").focus();
+      return toast("Say who you're looking for first — it's what discovery filters on", true);
+    }
+    const b = e.target.closest("button");
+    b.disabled = true; b.innerHTML = `<span class="spinner"></span> Creating…`;
+    try {
+      const c = await api("/api/campaigns", {
+        name: v.name || "Untitled campaign", goal: v.goal, target_description: v.target,
+        discovery_mode: v.mode, contacts_per_company: v.contacts, allow_inferred_emails: v.inferred,
+      });
+      S.newCampaign = null;
+      S.campaign = c.id;
+      toast("Campaign created");
+      go("campaigns");
+    } catch (err) {
+      fail(err);
+      b.disabled = false; b.innerHTML = `${icon("check")} Create campaign`;
+    }
+  };
+
+  wireSuggest(drawSummary);
+  wireReframe(drawSummary);
+  wireGateCheck(read);
 }
 
 /**
- * Rewrite rough notes into the two fields discovery actually uses.
+ * Propose campaigns from the product brief.
+ *
+ * The blank version of this screen is the hardest one in the product, and placeholder text is
+ * a poor teacher: it shows the shape of an answer without showing why that shape is right.
+ * Three concrete proposals drawn from the user's own brief, each labelled with the relationship
+ * it assumes, teach the distinction that the targeting gate later enforces.
+ */
+function wireSuggest(onApply) {
+  const btn = $("#btnSuggest"), out = $("#suggestOut");
+  if (!btn || !out) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    out.innerHTML = `<div class="card-note"><span class="spinner"></span> Reading your brief…</div>`;
+    try {
+      const r = await api("/api/campaigns/suggest", {});
+      out.innerHTML = `<div class="ideas">${r.campaigns.map((c, i) => `
+        <button type="button" class="idea" data-idea="${i}">
+          <span class="tag ${c.relationship === "customer" ? "solid" : "accent"}">${esc(c.relationship)}</span>
+          <b>${esc(c.name)}</b>
+          <span class="idea-target">${esc(c.target_description)}</span>
+          <span class="idea-goal">${icon("arrow-right")} ${esc(c.goal)}</span>
+          <span class="idea-why">${esc(c.why)}</span>
+          <span class="idea-use">Use this</span>
+        </button>`).join("")}</div>`;
+      $$("[data-idea]").forEach((b) => b.onclick = () => {
+        const c = r.campaigns[+b.dataset.idea];
+        $("#cName").value = c.name;
+        $("#cGoal").value = c.goal;
+        $("#cTarget").value = c.target_description;
+        out.innerHTML = `<div class="card-note">Filled in from "${esc(c.name)}" — edit anything
+          that is not right. Nothing is saved until you press Create.</div>`;
+        onApply?.();
+        $("#cTarget").focus();
+      });
+    } catch (e) {
+      // "Finish the product interview first" is the common one, and it is actionable.
+      out.innerHTML = `<div class="card-note">${esc(e?.message ?? "Couldn't suggest anything")}
+        ${e?.code === "NO_PRODUCT" ? `<button class="btn ghost sm" id="toProduct" style="margin-left:var(--s2)">Open Product</button>` : ""}</div>`;
+      $("#toProduct")?.addEventListener("click", () => go("product"));
+    } finally { btn.disabled = false; }
+  };
+}
+
+/**
+ * Rewrite rough notes into the fields discovery actually uses.
  *
  * Nothing is applied automatically. The suggestion is shown next to what you wrote, with the
  * tool's own account of what it changed and what it refused to guess, and you press Use it.
  * A rewrite you did not read is how a campaign ends up aimed at something you never chose.
  */
-function wireReframe() {
+function wireReframe(onApply) {
   const btn = $("#btnReframe"), out = $("#reframeOut");
   if (!btn || !out) return;
   btn.onclick = async () => {
-    const payload = {
-      name: $("#cName").value, goal: $("#cGoal").value, target: $("#cTarget").value,
-    };
+    const payload = { name: $("#cName").value, goal: $("#cGoal").value, target: $("#cTarget").value };
     if (!`${payload.name}${payload.goal}${payload.target}`.trim()) {
       return toast("Write something first, however rough", true);
     }
     btn.disabled = true;
-    out.innerHTML = `<div class="card-note" style="margin-top:var(--s3)"><span class="spinner"></span> Rewriting…</div>`;
+    out.innerHTML = `<div class="card-note"><span class="spinner"></span> Rewriting…</div>`;
     try {
       const r = await api("/api/campaigns/reframe", payload);
       out.innerHTML = `
         <div class="reframe">
-          <div class="reframe-field"><span class="rf-label">Name</span><span>${esc(r.name)}</span></div>
-          <div class="reframe-field"><span class="rf-label">Goal</span><span>${esc(r.goal)}</span></div>
           <div class="reframe-field"><span class="rf-label">Looking for</span><span>${esc(r.target_description)}</span></div>
+          <div class="reframe-field"><span class="rf-label">Goal</span><span>${esc(r.goal)}</span></div>
+          <div class="reframe-field"><span class="rf-label">Name</span><span>${esc(r.name)}</span></div>
           ${r.notes?.length ? `<ul class="rf-notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
           <div class="row" style="margin-top:var(--s3)">
             <button type="button" class="btn sm" id="rfUse">Use it</button>
@@ -1733,12 +2300,97 @@ function wireReframe() {
         if (r.name) $("#cName").value = r.name;
         if (r.goal) $("#cGoal").value = r.goal;
         if (r.target_description) $("#cTarget").value = r.target_description;
-        out.innerHTML = `<div class="card-note" style="margin-top:var(--s3)">Applied — edit anything that is not right.</div>`;
+        out.innerHTML = `<div class="card-note">Applied — edit anything that is not right.</div>`;
+        onApply?.();
       };
       $("#rfDrop").onclick = () => { out.innerHTML = ""; };
     } catch (e) { fail(e); out.innerHTML = ""; }
     finally { btn.disabled = false; }
   };
+}
+
+/**
+ * Dry-run the targeting gate before the campaign exists.
+ *
+ * This check already existed on the campaign page, which is to say it existed everywhere except
+ * the screen where the target is being written. Being able to paste a domain you know the
+ * answer for - one that should pass, one that should not - is the only way to find out whether
+ * the words you just typed mean to a model what they mean to you.
+ */
+function wireGateCheck(read) {
+  const btn = $("#btnGate"), out = $("#gateOut");
+  if (!btn || !out) return;
+  const run = async () => {
+    const v = read();
+    const website = $("#gateDomain").value.trim();
+    if (!v.target) return toast("Describe who you're looking for first", true);
+    if (!website) return toast("Enter a domain to check", true);
+    btn.disabled = true;
+    out.innerHTML = `<div class="card-note"><span class="spinner"></span> Fetching ${esc(website)}…</div>`;
+    try {
+      const r = await api("/api/campaigns/test-target", { website, target: v.target });
+      out.innerHTML = r.error
+        ? `<div class="card-note">Couldn't read that site: ${esc(r.error)}</div>`
+        : `<div class="gate-result" data-pass="${r.wouldPass ? 1 : 0}">
+             <div class="gate-verdict">
+               <span class="tag ${r.wouldPass ? "ok" : "bad"}">${r.wouldPass ? "included" : "rejected"}</span>
+               <span class="mono">fit ${num(r.fitScore ?? 0)}</span>
+             </div>
+             <div class="gate-kinds">
+               <span class="rf-label">Looking for</span><span>${esc(r.targetKind ?? "—")}</span>
+               <span class="rf-label">Found</span><span>${esc(r.entityKind ?? "—")}</span>
+             </div>
+             <p class="gate-reason">${esc(r.rejectedReason || r.reason || "")}</p>
+           </div>`;
+    } catch (e) { fail(e); out.innerHTML = ""; }
+    finally { btn.disabled = false; }
+  };
+  btn.onclick = run;
+  $("#gateDomain").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); run(); } };
+}
+
+/**
+ * Create an invite and show the link exactly once.
+ *
+ * The token is not stored anywhere it can be read back - only its SHA-256 digest is - so this
+ * dialog is genuinely the last chance to copy it. It says so, and it does not offer a Close
+ * button until the link has been on screen.
+ */
+function inviteDialog(onDone) {
+  modal("Invite a teammate", `
+    <label class="field">Who is this for?
+      <input id="invLabel" placeholder="Sam — co-founder" autofocus></label>
+    <p class="card-note">A name for your own benefit: it labels their devices in the list and
+      is what you will be revoking later. They never see it.</p>
+    <div id="invOut"></div>`,
+    async () => {
+      const r = await api("/api/share/invite", { label: $("#invLabel").value.trim() });
+      // Deliberately does not close: the link cannot be shown again.
+      const body = $("#modalBody");
+      body.innerHTML = `
+        <div class="invite-done">
+          <span class="tag ok">${icon("check")} Invite created</span>
+          <h3>Send this to ${esc(r.invite.label)}</h3>
+          ${r.link ? `
+            <div class="invite-link"><code class="mono">${esc(r.link)}</code></div>
+            <div class="row"><button class="btn" id="invCopy">${icon("copy")} Copy the link</button></div>
+            <p class="card-note">Opening it signs them in on that device and the code disappears
+              from their address bar. It is not shown again here — if it goes missing, revoke this
+              invite and make another.</p>`
+          : `<p class="card-note">${esc(r.hint ?? "")}</p>
+             <div class="invite-link"><code class="mono">${esc(r.token)}</code></div>
+             <div class="row"><button class="btn" id="invCopy">${icon("copy")} Copy the code</button></div>
+             <p class="card-note">Open the shared link first, then send them the URL and this code.</p>`}
+        </div>`;
+      $("#invCopy").onclick = async () => {
+        try { await navigator.clipboard.writeText(r.link ?? r.token); toast("Copied"); }
+        catch { toast("Couldn't copy — select it and copy by hand", true); }
+      };
+      $("#mOk").textContent = "Done";
+      $("#mOk").disabled = false;
+      $("#mOk").onclick = () => { $("#modal").innerHTML = ""; onDone?.(); };
+      return "keep-open";
+    }, "Create invite");
 }
 
 function campaignSettingsDialog(camp) {
@@ -1754,16 +2406,12 @@ function campaignSettingsDialog(camp) {
     <label class="check" style="margin-top:var(--s3)">
       <input type="checkbox" id="sInferred" ${camp.allow_inferred_emails ? "checked" : ""}>
       Allow guessed addresses when nobody publishes one</label>
-    <details style="margin-top:var(--s5)">
-      <summary style="color:var(--bad)">Delete this campaign</summary>
-      <p class="card-note">Removes its drafts, send log and replies. The companies and the facts
-        researched about them are kept — they are shared with your other campaigns.</p>
-      <div class="row">
-        <input id="sConfirm" aria-label="Type the campaign name to confirm"
-          placeholder="Type &ldquo;${esc(camp.name)}&rdquo; to confirm" style="flex:1;min-width:200px">
-        <button class="btn danger" id="btnDeleteCamp">Delete</button>
-      </div>
-    </details>`,
+    ${isOwner() ? `<div class="row" style="margin-top:var(--s5)">
+      <button type="button" class="btn ghost sm" id="btnDeleteCamp" style="color:var(--bad)">
+        ${icon("trash")} Delete this campaign</button>
+    </div>` : `<p class="card-note" style="margin-top:var(--s5)">Deleting a campaign also
+      deletes its send log, which is what the daily cap counts — so it happens on the machine
+      running coldcall, not from the shared link.</p>`}`,
     async () => {
       await api(`/api/campaigns/${camp.id}/settings`, {
         name: $("#sName").value, goal: $("#sGoal").value, target_description: $("#sTarget").value,
@@ -1772,15 +2420,49 @@ function campaignSettingsDialog(camp) {
       });
       toast("Saved"); go("campaigns");
     });
-  $("#btnDeleteCamp")?.addEventListener("click", async () => {
-    try {
-      const r = await api(`/api/campaigns/${camp.id}/delete`, { confirm: $("#sConfirm").value });
-      toast(`Deleted — ${r.removed.companies} companies unlinked, ${r.removed.drafts} drafts removed`);
-      $("#modal").innerHTML = "";
-      S.campaign = null;
-      go("campaigns");
-    } catch (e) { fail(e); }
+  $("#btnDeleteCamp")?.addEventListener("click", () => {
+    $("#modal").innerHTML = "";
+    deleteCampaignDialog(camp);
   });
+}
+
+/**
+ * Delete a campaign.
+ *
+ * It used to live behind a <details> inside campaign settings and always demanded the exact
+ * name typed out. That gate exists for one real reason - the send log goes with the campaign,
+ * and the daily cap counts what is left - so it now appears only when the campaign has actually
+ * sent something. Making someone transcribe "Untitled campaign" to bin a bad first draft of a
+ * target is how a person learns to click through the confirmation that mattered.
+ */
+function deleteCampaignDialog(camp) {
+  const sent = Number(camp.sent ?? 0);
+  modal(`Delete "${camp.name}"?`, `
+    <p class="card-note" style="margin-top:0">This removes the campaign, its
+      ${num(camp.drafts ?? 0)} draft${camp.drafts === 1 ? "" : "s"}, its follow-up schedule and
+      its replies.</p>
+    <p class="card-note">The ${num(camp.companies ?? 0)} companies and everything researched
+      about them are <b>kept</b> — they are shared with your other campaigns, and re-crawling
+      sites you have already been polite to once is not free.</p>
+    ${sent ? `
+      <div class="flagbox" data-sev="critical" style="margin-top:var(--s4)">
+        ${icon("warning-triangle")} <b>${num(sent)} email${sent === 1 ? " has" : "s have"} already gone out from this campaign.</b>
+        <div>Deleting it removes them from the send log, and the daily cap is counted from what
+          is left — so this frees up capacity to send more today than you meant to.</div>
+      </div>
+      <label class="field" style="margin-top:var(--s4)">Type <b>${esc(camp.name)}</b> to confirm
+        <input id="delConfirm" autocomplete="off" placeholder="${esc(camp.name)}"></label>`
+    : `<p class="card-note">Nothing has been sent from it, so there is nothing to lose but the drafts.</p>`}`,
+    async () => {
+      const r = await api(`/api/campaigns/${camp.id}/delete`,
+        sent ? { confirm: $("#delConfirm").value } : {});
+      toast(`Deleted — ${r.removed.drafts} draft(s) removed, ${r.removed.companies} companies kept`);
+      S.campaign = null;
+      S.campaigns = S.campaigns.filter((c) => c.id !== camp.id);
+      go("campaigns");
+    }, "Delete");
+  // The confirm button is the dangerous one here, so it should look like it.
+  $("#mOk").classList.add("danger");
 }
 
 function exportDialog(campaignId) {
@@ -1864,6 +2546,263 @@ async function showCompany(ccId) {
   });
 }
 
+/* ─────────────────────────────────────────────── shared access (owner only)
+
+   The send log records that this machine sent something. Once the link is open it cannot record
+   who decided to, and that is now a different person. This screen is that missing half: who is
+   connected, what they have done, and one button to end it. */
+
+/** Actions worth colouring. Everything else is ordinary work and should stay quiet. */
+const LOUD = [
+  [/^Sent an email/, "bad", "send"],
+  [/^Started sending/, "accent", "send"],
+  [/^Approved|^Bulk-approved/, "ok", "check"],
+  [/^Exported/, "accent", "download"],
+  [/^Added an address to never-contact/, "warn", "shield-check"],
+  [/^Overruled/, "warn", "warning-triangle"],
+  [/^Joined with an invite/, "ok", "user"],
+  [/^Signed out/, "", "xmark"],
+];
+const loudness = (action) => LOUD.find(([re]) => re.test(action)) ?? [null, "", "arrow-right"];
+
+/** Last seen inside two minutes reads as "here now" without needing a heartbeat of its own. */
+const isOnline = (s) => Date.now() - s.last_seen_at < 120_000;
+
+async function renderShared() {
+  const a = await api(`/api/share/activity${S.auditFailedOnly ? "?failed=1" : ""}`);
+  S.audit = a;
+  const t = a.tunnel ?? {};
+  const live = t.status === "ready" && !!t.url;
+  const online = a.sessions.filter(isOnline);
+
+  $("#content").innerHTML = page(`
+    <div class="statgrid stagger">
+      <div class="stat ${online.length ? "attn" : ""}">
+        <div class="stat-label">${icon("user")} Connected now</div>
+        <div class="stat-value">${num(online.length)}</div>
+        <div class="stat-foot">${a.sessions.length
+          ? `${num(a.sessions.length)} device${a.sessions.length === 1 ? "" : "s"} signed in`
+          : "nobody has joined"}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">${icon("graph-up")} Actions today</div>
+        <div class="stat-value">${num(a.summary.today)}</div>
+        <div class="stat-foot">${a.summary.lastAt ? `last ${esc(ago(a.summary.lastAt))}` : "nothing yet"}</div>
+      </div>
+      <div class="stat ${a.summary.sends ? "attn" : ""}">
+        <div class="stat-label">${icon("send")} Sent by hand today</div>
+        <div class="stat-value">${num(a.summary.sends)}</div>
+        <div class="stat-foot">${num(a.summary.approvals)} approved</div>
+      </div>
+      <div class="stat ${a.summary.refused ? "attn" : ""}">
+        <div class="stat-label">${icon("shield-check")} Refused today</div>
+        <div class="stat-value">${num(a.summary.refused)}</div>
+        <div class="stat-foot">${a.summary.refused
+          ? "reached for something owner-only"
+          : "nothing was turned away"}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>The link</h2>
+        ${live ? `<span class="tag ok">${icon("check")} open</span>` : `<span class="tag">closed</span>`}
+        <span class="card-actions">
+          ${live ? `<button class="btn ghost sm" id="btnCloseFromHere">Close the link</button>` : ""}
+          <button class="btn ghost sm" id="btnToShareSettings">${icon("settings")} Invites</button>
+        </span></div>
+      ${live ? `<div class="share-url"><span class="rf-label">URL</span>
+          <a class="mono" href="${esc(t.url)}" target="_blank" rel="noreferrer">${esc(t.url)}</a>
+          <button class="btn ghost sm" data-copy="${esc(t.url)}">Copy</button></div>`
+        : `<p class="card-note" style="margin-top:0">The link is closed, so nobody can reach this
+           machine through it. Everything below still happened.</p>`}
+
+      ${a.sessions.length ? `<ul class="share-list" style="margin-top:var(--s4)">${a.sessions.map((x) => `
+        <li>
+          <span class="dot ${isOnline(x) ? "ok pulse" : ""}"></span>
+          <span>${esc(x.label || "Teammate")}</span>
+          <span class="cellsub">${esc(shortAgent(x.user_agent))} · ${isOnline(x) ? "here now" : `last seen ${esc(ago(x.last_seen_at))}`}</span>
+          <button class="btn sm ghost" data-revsession="${esc(x.id)}">Sign out</button>
+        </li>`).join("")}</ul>` : ""}
+    </div>
+
+    <div class="card liveview-card" id="liveViewCard">
+      <div class="card-head"><h2>${icon("eye")} Live view</h2>
+        <span class="cellsub">Their cursor and clicks inside the tab, as they happen.</span></div>
+      <div id="liveView" class="liveview"></div>
+      <p class="card-note">You see where they point, what they click and which field they are in —
+        not what they type into it. They are shown a “someone is watching” note while this screen
+        is open, which is on purpose and cannot be turned off.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>What they did</h2>
+        <span class="card-actions">
+          <label class="check"><input type="checkbox" id="auditFailed" ${S.auditFailedOnly ? "checked" : ""}>
+            Only what was refused</label>
+        </span></div>
+      ${a.entries.length ? `<div class="feed" id="auditFeed">${a.entries.map(auditRow).join("")}</div>`
+        : empty("user", S.auditFailedOnly ? "Nothing was refused" : "Nothing yet",
+            S.auditFailedOnly
+              ? "Every request over the shared link has been something it is allowed to do."
+              : "Approvals, sends, campaign changes and exports made over the shared link show up here as they happen.")}
+      <p class="card-note">Reading is not recorded — a row every time somebody opened the review
+        queue would bury the six lines that matter. Everything that changes something is, and so
+        is every CSV export, because that is the only way data leaves through the link.</p>
+    </div>`);
+
+  startWatchHeartbeat();
+  S.presenceMap = {};
+  for (const pstate of (a.presence ?? [])) S.presenceMap[pstate.sessionId] = pstate;
+  updateLiveView();
+
+  $("#btnToShareSettings").onclick = () => go("settings");
+  $("#btnCloseFromHere")?.addEventListener("click", async () => {
+    if (!confirm("Close the shared link?\n\nThe URL stops working immediately. Signed-in devices are kept, so re-opening later lets them back in without a new invite.")) return;
+    try { await api("/api/share/stop", {}); toast("Shared link closed"); } catch (e) { fail(e); }
+    renderShared().catch(fail);
+  });
+  $("#auditFailed").onchange = (e) => { S.auditFailedOnly = e.target.checked; renderShared().catch(fail); };
+  $$("[data-revsession]").forEach((b) => b.onclick = async () => {
+    try { await api(`/api/share/session/${b.dataset.revsession}/revoke`, {}); toast("Signed out"); }
+    catch (e) { fail(e); }
+    renderShared().catch(fail);
+  });
+  $$("[data-copy]").forEach((b) => b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
+    catch { toast("Couldn't copy — select it and copy by hand", true); }
+  });
+}
+
+function auditRow(e) {
+  const [, tone, ic] = loudness(e.action);
+  const refused = !e.ok;
+  return `<div class="feed-item">
+    <span class="feed-icon ${refused ? "bad" : tone}">${icon(refused ? "shield-check" : ic)}</span>
+    <span class="audit-body">
+      <span class="audit-line">${refused ? `<span class="tag bad">refused</span> ` : ""}${esc(e.action)}</span>
+      ${e.detail ? `<span class="cellsub">${esc(e.detail)}</span>` : ""}
+      ${refused ? `<span class="cellsub mono">${esc(e.method)} ${esc(e.path)}</span>` : ""}
+    </span>
+    <span class="feed-time" title="${esc(dt(e.created_at))}">${esc(e.label)} · ${esc(ago(e.created_at))}</span>
+  </div>`;
+}
+
+/* The owner's heartbeat that says "I am watching", so the co-founder's chip stays lit. Decays
+   on its own server-side, and is stopped the moment the owner leaves this screen. */
+let _watchTimer = null;
+function startWatchHeartbeat() {
+  stopWatchHeartbeat();
+  const beat = () => { api("/api/share/watch", {}).catch(() => {}); };
+  beat();
+  _watchTimer = setInterval(beat, 4000);
+}
+function stopWatchHeartbeat() { if (_watchTimer) { clearInterval(_watchTimer); _watchTimer = null; } }
+
+/**
+ * Draw the live view from S.presenceMap.
+ *
+ * Updates in place rather than re-rendering: a fresh innerHTML every frame would kill the CSS
+ * transition that makes the cursor glide instead of teleport. Each session gets a box whose
+ * aspect matches their window, a dot that eases to the new position, and a ripple on each click.
+ */
+function updateLiveView() {
+  const host = $("#liveView");
+  if (!host) return;
+  const fresh = Object.values(S.presenceMap ?? {}).filter((p) => Date.now() - p.at < 20000);
+
+  if (!fresh.length) {
+    host.innerHTML = `<div class="liveview-idle">${icon("user")}
+      <span>Nobody is moving around right now. When someone is using the shared link, their
+      cursor shows up here.</span></div>`;
+    return;
+  }
+
+  for (const p of fresh) {
+    let panel = host.querySelector(`[data-live="${cssq(p.sessionId)}"]`);
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.className = "liveview-panel";
+      panel.dataset.live = p.sessionId;
+      panel.innerHTML = `
+        <div class="lv-head"><span class="lv-who">${esc(p.label || "Teammate")}</span>
+          <span class="lv-where cellsub"></span></div>
+        <div class="lv-screen"><div class="lv-cursor"></div><div class="lv-ripples"></div></div>
+        <div class="lv-field cellsub"></div>`;
+      host.append(panel);
+    }
+    const screen = panel.querySelector(".lv-screen");
+    const ar = p.viewport ? p.viewport.w / p.viewport.h : 16 / 9;
+    screen.style.aspectRatio = `${Math.max(0.4, Math.min(3, ar))}`;
+    panel.querySelector(".lv-where").textContent = TITLES[p.route]?.[0] ? `on ${TITLES[p.route][0]}` : "";
+    const dot = panel.querySelector(".lv-cursor");
+    if (p.cursor) {
+      dot.style.opacity = "1";
+      dot.style.left = `${(p.cursor.x * 100).toFixed(2)}%`;
+      dot.style.top = `${(p.cursor.y * 100).toFixed(2)}%`;
+    } else dot.style.opacity = "0";
+    const field = panel.querySelector(".lv-field");
+    field.textContent = p.field ? `typing in ${p.field}` : "";
+    field.classList.toggle("hidden", !p.field);
+    // Ripples: one per click, self-removing so they do not pile up.
+    const layer = panel.querySelector(".lv-ripples");
+    for (const c of (p.clicks ?? [])) {
+      if (layer.dataset.last && Number(layer.dataset.last) >= c.at) continue;
+      const r = document.createElement("span");
+      r.className = "lv-ripple";
+      r.style.left = `${(c.x * 100).toFixed(2)}%`;
+      r.style.top = `${(c.y * 100).toFixed(2)}%`;
+      layer.append(r);
+      setTimeout(() => r.remove(), 650);
+    }
+    if (p.clicks?.length) layer.dataset.last = String(Math.max(...p.clicks.map((c) => c.at)));
+  }
+
+  // Drop panels for sessions that have gone quiet.
+  const live = new Set(fresh.map((p) => p.sessionId));
+  host.querySelectorAll("[data-live]").forEach((el) => { if (!live.has(el.dataset.live)) el.remove(); });
+}
+
+/** Escape a value for use inside a CSS attribute selector. */
+const cssq = (s) => String(s).replace(/["\\\]]/g, "\\$&");
+
+/* ───────────────────────────────────────────────────────── shared surface */
+
+/**
+ * Make it obvious, at a glance and permanently, that this is not the owner's machine.
+ *
+ * A tool that looks identical on both surfaces is a tool where someone eventually goes looking
+ * for the mailbox settings, cannot find them, and assumes it is broken. The strip says whose
+ * machine the work actually happens on, and the sign-out button is the only thing here that
+ * the owner's copy does not have.
+ */
+function markSharedSurface(me) {
+  document.querySelector(".brand-name").textContent = "coldcall";
+  const foot = document.querySelector(".sidebar-foot");
+  const who = document.createElement("div");
+  who.className = "shared-badge";
+  who.title = "You are working on someone else's machine. What you approve, send, change or "
+    + "export is recorded there.";
+  who.innerHTML = `
+    <span class="shared-dot" aria-hidden="true"></span>
+    <span class="sidebar-foot-text shared-text">
+      <b>Shared link</b>
+      <span>${esc(me.label || "Teammate")}</span>
+    </span>`;
+  foot.prepend(who);
+
+  const out = document.createElement("button");
+  out.className = "health-row";
+  out.type = "button";
+  out.innerHTML = `<svg width="14" height="14" aria-hidden="true"><use href="#i-xmark"/></svg>
+    <span class="sidebar-foot-text">Sign out</span>`;
+  out.onclick = async () => {
+    if (!confirm("Sign out of the shared link on this device?")) return;
+    try { await api("/api/share/leave", {}); } catch { /* the cookie is cleared either way */ }
+    location.reload();
+  };
+  foot.append(out);
+}
+
 /* ───────────────────────────────────────────────────────── health + events */
 
 async function loadHealth() {
@@ -1881,11 +2820,20 @@ async function loadHealth() {
     else if (oc !== "ready") { cls = "dot bad"; label = `opencode ${oc}`; }
     else if (probing) { cls = "dot warn pulse"; label = "checking models…"; }
     else if (h.model.writing.status !== "ok") { cls = "dot warn"; label = "no model"; }
-    else if (!h.smtp.configured) { cls = "dot warn"; label = "mailbox not set up"; }
+    else if (!h.smtp.configured) { cls = "dot warn"; label = isOwner() ? "mailbox not set up" : "mailbox not connected"; }
     else { cls = "dot ok"; label = "all systems ready"; }
     dot.className = cls; text.textContent = label;
 
-    if (oc === "not_installed") {
+    if (!isOwner()) {
+      // The teammate cannot fix any of this and cannot run a terminal on that machine. Say
+      // what it means for them - work will not progress - and who has to do something.
+      banner.className = (oc === "ready" && h.model.writing.status === "ok") ? "banner hidden" : "banner warn";
+      if (banner.className !== "banner hidden") {
+        banner.innerHTML = `${icon("warning-triangle")} The machine running coldcall can't write
+          emails at the moment${oc === "ready" ? "" : ` (opencode is ${esc(oc)})`}. Approving and
+          sending still work; researching and drafting will wait. Ask whoever set this up to look.`;
+      }
+    } else if (oc === "not_installed") {
       banner.className = "banner";
       banner.innerHTML = `${icon("warning-triangle")} opencode isn't installed. Run
         <code class="mono">curl -fsSL https://opencode.ai/install | bash</code> then restart coldcall.`;
@@ -1911,6 +2859,7 @@ async function loadHealth() {
       needsReview: h.review?.needsReview ?? S.stats.needsReview ?? 0,
       approvedWaiting: h.sending?.approved ?? S.stats.approvedWaiting ?? 0,
       repliesUnhandled: h.replies?.unhandled ?? S.stats.repliesUnhandled ?? 0,
+      sharedLive: h.share?.online ?? 0,
     });
     renderNav();
   } catch { $("#hDot").className = "dot bad"; $("#hText").textContent = "server unreachable"; }
@@ -1960,10 +2909,95 @@ function connectEvents() {
   ev.addEventListener("drafts:changed", () => { if (S.route === "review") renderReview(); loadHealth(); });
   ev.addEventListener("replies:changed", () => { if (S.route === "replies") renderReplies(); loadHealth(); });
   ev.addEventListener("models:changed", () => { loadHealth(); if (S.route === "settings") renderSettings(); });
+  ev.addEventListener("share:changed", () => {
+    if (S.route === "settings") renderSettings();
+    if (S.route === "shared") renderShared().catch(() => {});
+  });
+  ev.addEventListener("share:presence", (e) => {
+    const p = JSON.parse(e.data);
+    if (S.route !== "shared") return;
+    (S.presenceMap ??= {})[p.sessionId] = p;
+    updateLiveView();
+  });
+  // Live, because "what are they doing" is a present-tense question. Prepending rather than
+  // re-rendering keeps the scroll position where the reader put it.
+  ev.addEventListener("share:activity", (e) => {
+    const row = JSON.parse(e.data);
+    if (S.route !== "shared") { loadHealth(); return; }
+    const feed = $("#auditFeed");
+    if (!feed || (S.auditFailedOnly && row.ok)) return;
+    feed.insertAdjacentHTML("afterbegin", auditRow(row));
+    feed.firstElementChild?.classList.add("audit-new");
+  });
   ev.onerror = () => { /* EventSource reconnects on its own */ };
 }
 
 /* ───────────────────────────────────────────────────────── boot */
+
+/**
+ * The join screen, shown on the shared link before anyone has redeemed an invite.
+ *
+ * It is a screen rather than an error, because arriving here is the normal first thing that
+ * happens to the person the link was sent to. If the link carries a token in its fragment -
+ * which is where the invite puts it, so it never reaches a server log - it redeems itself and
+ * this is on screen for about as long as it takes to read the title.
+ */
+async function renderJoin(autoToken) {
+  document.body.dataset.surface = "join";
+  const paint = (state, message) => {
+    $("#content").innerHTML = `
+      <div class="join">
+        <div class="join-card">
+          <span class="join-mark">${icon("send")}</span>
+          <h1>coldcall</h1>
+          <p class="join-lede">${state === "working"
+            ? "Signing you in…"
+            : "This is a shared link. Paste the invite you were sent to get in."}</p>
+          ${state === "working" ? `<div class="join-spin"><span class="spinner"></span></div>` : `
+            <label class="field join-field">Invite code
+              <input id="joinToken" autocomplete="off" spellcheck="false" placeholder="paste the code from your invite link"></label>
+            <button class="btn join-btn" id="joinGo">${icon("arrow-right")} Continue</button>`}
+          ${message ? `<p class="join-error">${esc(message)}</p>` : ""}
+          <p class="join-foot">Everything you do here happens on your teammate's machine.
+            The mailbox, the keys and the model settings stay there — this link cannot read them.
+            What you approve, send, change or export is recorded on that machine, for them to see.</p>
+        </div>
+      </div>`;
+    if (state !== "working") {
+      const go = async () => {
+        const raw = $("#joinToken").value.trim();
+        if (!raw) return;
+        paint("working");
+        try {
+          await api("/api/share/redeem", { token: tokenFromAnything(raw) });
+          location.hash = "";
+          location.reload();
+        } catch (e) { paint("form", e?.message || "that invite is not valid"); }
+      };
+      $("#joinGo").onclick = go;
+      $("#joinToken").onkeydown = (e) => { if (e.key === "Enter") go(); };
+      $("#joinToken").focus();
+    }
+  };
+
+  if (autoToken) {
+    paint("working");
+    try {
+      await api("/api/share/redeem", { token: autoToken });
+      // Drop the token out of the address bar before anything else can copy it out of there.
+      history.replaceState(null, "", location.pathname);
+      location.reload();
+      return;
+    } catch (e) { paint("form", e?.message || "that invite is not valid"); return; }
+  }
+  paint("form");
+}
+
+/** Accept the whole invite link, or just the code out of it. People paste both. */
+function tokenFromAnything(text) {
+  const m = /[#&?]join=([A-Za-z0-9_-]+)/.exec(text);
+  return m ? m[1] : text.replace(/^.*[#/]/, "").trim();
+}
 
 async function boot() {
   // Load the icon sprite before first paint so nothing flashes an empty box.
@@ -1984,7 +3018,22 @@ async function boot() {
   $("#themeBtn").onclick = cycleTheme;
   $("#collapseBtn").onclick = toggleCollapse;
   $("#searchBtn").onclick = openPalette;
-  $("#healthBtn").onclick = () => go("settings");
+
+  /* Which surface is this, and are we allowed in? Asked before anything else, because on the
+     shared link every other request would 401 and the user would see a wall of failures
+     instead of the one screen that can actually help them. */
+  const joinToken = /[#&]join=([A-Za-z0-9_-]+)/.exec(location.hash)?.[1];
+  let me;
+  try { me = await api("/api/share/me"); } catch { me = { surface: "local", role: "owner", authenticated: true }; }
+  S.surface = me.surface; S.sessionLabel = me.label ?? null;
+
+  if (!me.authenticated) { await renderJoin(joinToken); return; }
+  if (joinToken) history.replaceState(null, "", location.pathname);
+  S.role = me.role === "sender" ? "sender" : "owner";
+  document.body.dataset.surface = S.surface;
+
+  $("#healthBtn").onclick = () => { if (isOwner()) go("settings"); };
+  if (S.surface === "shared") { markSharedSurface(me); startPresenceReporting(); }
 
   connectEvents();
   await loadHealth();
@@ -1995,14 +3044,14 @@ async function boot() {
   const [hashRoute, hashCampaign] = location.hash.replace(/^#/, "").split("/");
   if (hashCampaign) S.campaign = hashCampaign;
   if (!S.campaign && S.campaigns.length) S.campaign = S.campaigns[0].id;
-  go(TITLES[hashRoute] ? hashRoute : "dashboard");
+  go(TITLES[hashRoute] && canOpen(hashRoute) ? hashRoute : "dashboard");
 
   // Without this, the browser back button and any direct #hash link silently do nothing:
   // the URL changes and the page keeps rendering whatever it was already showing.
   addEventListener("hashchange", () => {
     const [route, campaign] = location.hash.replace(/^#/, "").split("/");
     if (campaign && campaign !== S.campaign) S.campaign = campaign;
-    if (TITLES[route] && route !== S.route) go(route);
+    if (TITLES[route] && canOpen(route) && route !== S.route) go(route);
   });
 
   setInterval(loadHealth, 6000);

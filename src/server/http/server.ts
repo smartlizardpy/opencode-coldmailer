@@ -10,6 +10,11 @@ import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppContext } from "../context.ts";
 import { registerRoutes } from "./routes.ts";
+import {
+  allows, anonymousAllows, readCookie, sessionFor, SESSION_COOKIE,
+  type Role, type SessionRow,
+} from "./access.ts";
+import { describeAction, recordAudit } from "./audit.ts";
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../ui");
 
@@ -17,6 +22,11 @@ export type Handler = (ctx: RouteCtx) => Promise<unknown> | unknown;
 export interface RouteCtx {
   req: IncomingMessage; res: ServerResponse; app: AppContext;
   params: Record<string, string>; query: URLSearchParams; body: any;
+  /** "owner" on 127.0.0.1, "sender" through the tunnel. See http/access.ts. */
+  role: Role;
+  /** True when the request arrived over the shared tunnel rather than the loopback. */
+  remote: boolean;
+  session?: SessionRow;
 }
 
 interface Route { method: string; pattern: RegExp; keys: string[]; handler: Handler }
@@ -62,26 +72,37 @@ async function readBody(req: IncomingMessage): Promise<any> {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
-/** Server-sent events, so the UI can show live progress without polling. */
+/**
+ * Server-sent events, so the UI can show live progress without polling.
+ *
+ * Every client carries the role it connected with. Some events are the owner's business only -
+ * `opencode:error` quotes the child process's stderr, `models:changed` names the models this
+ * machine is signed in to - and an event stream is the easy place to forget that, because the
+ * emit call sites are scattered and none of them look like an API response.
+ */
 export class EventBus {
-  private readonly clients = new Set<ServerResponse>();
+  private readonly clients = new Set<{ res: ServerResponse; role: Role }>();
 
-  attach(res: ServerResponse): void {
+  attach(res: ServerResponse, role: Role = "owner"): void {
     res.writeHead(200, {
       "content-type": "text/event-stream", "cache-control": "no-cache",
       connection: "keep-alive", "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
-    this.clients.add(res);
+    const client = { res, role };
+    this.clients.add(client);
     // unref: a keepalive ping should never be the only thing keeping the process alive.
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, 25_000);
     ping.unref?.();
-    res.on("close", () => { clearInterval(ping); this.clients.delete(res); });
+    res.on("close", () => { clearInterval(ping); this.clients.delete(client); });
   }
 
-  emit(type: string, data: unknown): void {
+  emit(type: string, data: unknown, ownerOnly = false): void {
     const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const c of this.clients) { try { c.write(frame); } catch { this.clients.delete(c); } }
+    for (const c of this.clients) {
+      if (ownerOnly && c.role !== "owner") continue;
+      try { c.res.write(frame); } catch { this.clients.delete(c); }
+    }
   }
 }
 
@@ -89,25 +110,107 @@ export function createApp(app: AppContext): Server {
   const router = new Router();
   registerRoutes(router, app);
 
+  const json = (res: ServerResponse, status: number, payload: unknown): void => {
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify(payload));
+  };
+
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
+    const method = req.method ?? "GET";
 
-    // Local-only tool: refuse anything that did not come from this machine.
-    const host = req.headers.host ?? "";
-    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) {
+    /* -------------------------------------------------- which surface is this?
+       Two are legitimate: the loopback, which is the owner's own machine, and the exact
+       hostname the tunnel is currently answering on. Matching the tunnel host exactly is also
+       what stops DNS rebinding - a page on another origin that resolves a name to 127.0.0.1
+       still has to send a Host header, and neither of these will be it. */
+    const host = (req.headers.host ?? "").toLowerCase();
+    const isLocal = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host);
+    const tunnelHost = app.tunnel?.hostname?.toLowerCase();
+    const isTunnel = !!tunnelHost && host === tunnelHost;
+
+    if (!isLocal && !isTunnel) {
       res.writeHead(403, { "content-type": "text/plain" });
-      return res.end("coldcall only serves localhost");
+      return res.end("coldcall only serves localhost, or the shared link while it is open");
     }
 
-    if (path === "/api/events") return app.bus.attach(res);
+    const session = isTunnel ? sessionFor(app.db, readCookie(req.headers.cookie, SESSION_COOKIE)) : undefined;
+    const role: Role | null = isLocal ? "owner" : (session?.role ?? null);
+
+    /* CSRF. The session cookie is SameSite=Lax, so a cross-site POST carries no cookie at all
+       and this is the second lock rather than the first. It is worth having anyway: Lax is a
+       browser promise, and this is a check we make ourselves. */
+    if (isTunnel && method === "POST") {
+      const origin = req.headers.origin;
+      if (origin && origin.toLowerCase() !== `https://${tunnelHost}`) {
+        return json(res, 403, { error: "cross-site request refused", code: "BAD_ORIGIN" });
+      }
+    }
+
+    const authorized = (m: string, p: string): boolean =>
+      role === null ? anonymousAllows(m, p) : allows(role, m, p);
+
+    /**
+     * One row per state change made over the shared link, written here because here is the one
+     * place every such request passes. Refusals are recorded too - a 403 against the settings
+     * endpoint is the single most interesting line this log can contain.
+     *
+     * Never for the owner: this exists to say what a DELEGATED session did, and logging the
+     * machine's own user's every click would bury that under noise about themselves.
+     */
+    const audit = (status: number, body?: unknown, always = false): void => {
+      if (!isTunnel) return;
+      // Presence is posted several times a second; a row each would drown the log it lives
+      // next to. It is live-only state, and the audit trail already records what came of it.
+      if (path === "/api/share/presence") return;
+      // A refusal is recorded whatever the method. `describeAction` deliberately ignores plain
+      // reads, but "they reached for /api/keys" is a GET and is the single most interesting
+      // line this log can contain — dropping it because of its verb would be absurd.
+      const what = describeAction(app.db, method, path, body)
+        ?? (always ? { action: `${method} ${path}`, detail: "", subject: undefined } : undefined);
+      if (!what) return;
+      /* The join row is the one request that creates the session it should be attributed to,
+         so `session` was legitimately undefined when this request arrived. Attribute it to the
+         session it just made, or the feed reads "Joined with an invite — not signed in" above a
+         column of rows that all know exactly who this is. */
+      const joined = !session && status < 400 && path === "/api/share/redeem"
+        ? app.db.prepare("SELECT id, label FROM share_session ORDER BY id DESC LIMIT 1").get() as { id: string; label: string } | undefined
+        : undefined;
+      const row = recordAudit(app.db, {
+        sessionId: session?.id ?? joined?.id ?? null,
+        label: session?.label ?? joined?.label ?? "not signed in",
+        method, path, action: what.action, detail: what.detail, subject: what.subject, status,
+      });
+      if (row) app.bus.emit("share:activity", row, true);
+    };
+
+    if (path === "/api/events") {
+      if (!role) return json(res, 401, { error: "this link needs an invite", code: "NO_SESSION" });
+      return app.bus.attach(res, role);
+    }
 
     if (path.startsWith("/api/")) {
-      const m = router.match(req.method ?? "GET", path);
+      if (!authorized(method, path)) {
+        // Worth a row even though nothing happened: someone reaching for the settings endpoint
+        // over the shared link is exactly what the owner would want to know about.
+        audit(role === null ? 401 : 403, undefined, true);
+        return role === null
+          ? json(res, 401, { error: "this link needs an invite", code: "NO_SESSION" })
+          : json(res, 403, {
+              error: "that is only available on the machine running coldcall",
+              code: "OWNER_ONLY",
+            });
+      }
+      const m = router.match(method, path);
       if (!m) { res.writeHead(404, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "not found" })); }
       try {
         const body = req.method === "POST" ? await readBody(req) : {};
-        const out = await m.handler({ req, res, app, params: m.params, query: url.searchParams, body });
+        const out = await m.handler({
+          req, res, app, params: m.params, query: url.searchParams, body,
+          role: role ?? "sender", remote: isTunnel, session,
+        });
+        audit(200, body);
         if (res.writableEnded) return;
         res.writeHead(200, {
           "content-type": "application/json; charset=utf-8",
@@ -122,6 +225,7 @@ export function createApp(app: AppContext): Server {
       } catch (e) {
         const err = e as any;
         app.log(`API ${path} failed: ${err?.message}`);
+        audit(err?.status ?? 500, undefined, true);
         if (res.writableEnded) return;
         res.writeHead(err?.status ?? 500, { "content-type": "application/json", "cache-control": "no-store" });
         return res.end(JSON.stringify({

@@ -13,3 +13,31 @@
   Ran audit rather than redesign: the style lock was already established and implemented, and
   both mechanical gates came back clean, so effort went to information design and features
   instead of restyling. Worth confirming that was the right read of "make it good".
+
+2026-09-01 pending-review | surface: new campaign | axis: container / information hierarchy
+  Promoted "New campaign" from a modal to its own route with a two-column layout: numbered
+  steps left, a live read-back of the campaign plus a targeting-gate dry run pinned right.
+  The modal put the hardest question in the product (name the KIND of organisation) third,
+  in a scrolling box, with no room beside it for the two things that help answer it. Ordered
+  the steps by difficulty rather than by database column order, so "who are you looking for"
+  is now first and largest and the campaign name is third. Not yet seen rendered by a human —
+  no browser was available this session, so the layout is reasoned rather than looked at.
+
+2026-09-01 pending-review | surface: new campaign | axis: AI affordance
+  Three AI helpers, each placed against the field it helps with rather than gathered into a
+  toolbar: "Suggest campaigns" reads the product brief and proposes three aimed at different
+  RELATIONSHIPS (customer / partner / press), "Tidy this up" is the existing reframe, and the
+  gate dry-run now runs before the campaign exists. Chose suggestion cards over autofill: a
+  campaign aimed at something you never read is the failure this whole screen guards against.
+
+2026-09-01 pending-review | surface: shell | axis: scope / access
+  Split the app into two surfaces (local owner, shared teammate over a Cloudflare tunnel).
+  Chose a positive per-route allow-list over hiding UI, so an endpoint added later is invisible
+  to the shared link until someone opts it in. Marked the shared surface permanently in the
+  sidebar rather than trusting the URL to communicate it — an identical-looking app is one
+  where somebody eventually goes hunting for the mailbox settings and concludes it is broken.
+
+2026-09-01 pending-review | surface: settings | axis: information density
+  Settings now carries three more cards (share, your company, keys) and is getting long. Left
+  it as one scrolling page for now rather than adding tabs, because every card on it is set up
+  once and then never touched. Worth revisiting if a fourth arrives.

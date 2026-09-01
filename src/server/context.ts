@@ -8,6 +8,7 @@ import type { ModelSlots } from "./opencode/models.ts";
 import type { Fetcher } from "./research/fetcher.ts";
 import type { EventBus } from "./http/server.ts";
 import type { SendRunner } from "./queue/sendQueue.ts";
+import type { TunnelSupervisor } from "./tunnel/cloudflared.ts";
 import { getSetting } from "./db/settings.ts";
 import { GMAIL_PRESET, type SmtpConfig } from "./mail/smtp.ts";
 import { GMAIL_IMAP, type ImapConfig } from "./mail/imap.ts";
@@ -23,6 +24,13 @@ export interface AppContext {
   fetcher: Fetcher;
   bus: EventBus;
   sender: SendRunner;
+  /**
+   * The Cloudflare tunnel, if one has been opened. Its hostname is the ONLY remote Host header
+   * the server accepts, so this is load-bearing for access control and not just for the UI.
+   */
+  tunnel: TunnelSupervisor;
+  /** The port the local server ended up on, so the tunnel knows what to point at. */
+  port: () => number;
   slots: () => ModelSlots;
   setSlots: (s: ModelSlots) => void;
   smtpConfig: () => SmtpConfig | undefined;

@@ -18,6 +18,7 @@ import { LlmService } from "./llm/index.ts";
 import { probeModels, type ModelSlots } from "./opencode/models.ts";
 import { Fetcher } from "./research/fetcher.ts";
 import { EventBus, createApp, listenOnFreePort } from "./http/server.ts";
+import { TunnelSupervisor, locateCloudflared } from "./tunnel/cloudflared.ts";
 import { SendRunner } from "./queue/sendQueue.ts";
 import { coldcallHome, readImapConfig, readSmtpConfig, type AppContext } from "./context.ts";
 import { pollReplies } from "./mail/imap.ts";
@@ -50,6 +51,7 @@ const HELP = `coldcall - local cold email, powered by opencode
 
   coldcall              start the app and open the web UI
   coldcall --no-open    start without opening a browser
+  coldcall --share      also open the shared link for a teammate (needs cloudflared)
   coldcall repair       resolve references left dangling by an external edit
   coldcall doctor       report what is and is not working, then exit
   coldcall where        print where your data lives
@@ -58,6 +60,13 @@ const HELP = `coldcall - local cold email, powered by opencode
 Environment:
   COLDCALL_PORT         web UI port (default 7788)
   COLDCALL_HOME         data directory (default ~/.coldcall)
+  COLDCALL_CLOUDFLARED_BIN  path to cloudflared, if it is somewhere unusual
+
+Two surfaces:
+  The local one, on 127.0.0.1, is yours: mailbox, keys, models, your company details.
+  The shared one is a Cloudflare tunnel URL you hand to a teammate. It can run campaigns,
+  review drafts and send; it cannot read a key or change how this machine sends. Open it
+  from Settings, invite someone, and close it when you are done - it dies with the process.
 `;
 
 /** Commands that inspect or repair without starting a server. */
@@ -105,6 +114,16 @@ async function runCommand(cmd: string, home: string): Promise<boolean> {
     line(slots.research?.status === "ok", "research model", slots.research?.active
       ? `${slots.research.active.providerID}/${slots.research.active.modelID}` : "none - discovery falls back to manual");
     line(!!smtp.configured, "mailbox", smtp.configured ? (smtp.user ?? "configured") : "not set up - Settings in the web UI");
+    const profile = db.prepare("SELECT * FROM company_profile WHERE id=1").get() as Record<string, string> | undefined;
+    line(!!profile?.sender_name, "your company",
+      profile?.sender_name ? `${profile.sender_name} at ${profile.trading_name || profile.legal_name || "?"}` : "not set up - Settings in the web UI");
+    const keys = (db.prepare("SELECT COUNT(*) n FROM credential").get() as { n: number }).n;
+    line(true, "keys", keys ? `${keys} stored, encrypted (${join(home, "vault.key")})` : "none stored");
+    const cf = await locateCloudflared();
+    // Not a failure: sharing is opt-in, and most runs never want it.
+    line(true, "sharing", cf ? `cloudflared at ${cf}` : "cloudflared not installed - the shared link is unavailable");
+    const live = (db.prepare("SELECT COUNT(*) n FROM share_session WHERE revoked_at IS NULL AND expires_at > ?").get(Date.now()) as { n: number }).n;
+    if (live) line(true, "shared sessions", `${live} teammate device(s) can sign in when the link is open`);
     return true;
   }
   return false;
@@ -184,8 +203,16 @@ export async function main(argv: string[] = []): Promise<void> {
   });
   const sender = new SendRunner(db, () => readSmtpConfig(db));
 
+  // Never started here. The owner opens it from Settings, and it dies with the process.
+  let boundPort = 0;
+  const tunnel = new TunnelSupervisor({
+    log,
+    onChange: () => bus.emit("share:changed", tunnel.state(), true),
+  });
+
   const app: AppContext = {
-    db, supervisor, llm, fetcher: new Fetcher(), bus, sender,
+    db, supervisor, llm, fetcher: new Fetcher(), bus, sender, tunnel,
+    port: () => boundPort,
     slots: () => slots,
     setSlots: (s) => { slots = s; },
     smtpConfig: () => readSmtpConfig(db),
@@ -196,9 +223,18 @@ export async function main(argv: string[] = []): Promise<void> {
   // 3. HTTP + browser BEFORE opencode.
   const server = createApp(app);
   const port = await listenOnFreePort(server, Number(process.env.COLDCALL_PORT) || 7788);
+  boundPort = port;
   const url = `http://127.0.0.1:${port}`;
   log(`web UI ready at ${url}`);
   if (!argv.includes("--no-open")) openBrowser(url);
+
+  // Opt-in, and only ever from an explicit flag or an explicit click.
+  if (argv.includes("--share")) {
+    void tunnel.start(port).then(
+      (u) => log(`shared surface open at ${u} - create an invite in Settings to let someone in`),
+      (e) => log(`could not open the shared link: ${(e as Error).message}`),
+    );
+  }
 
   // 4. opencode, in the background. Failure is a banner, not a crash.
   void (async () => {
@@ -206,7 +242,7 @@ export async function main(argv: string[] = []): Promise<void> {
       await supervisor.start();
       await writeFile(pidFile, String((supervisor as any).child?.pid ?? ""), "utf8").catch(() => {});
       log(`opencode ready at ${supervisor.url}`);
-      bus.emit("opencode:ready", { url: supervisor.url });
+      bus.emit("opencode:ready", { url: supervisor.url }, true);
 
       if (slots.writing.status !== "ok") {
         log("probing models (first run takes a minute)...");
@@ -222,12 +258,12 @@ export async function main(argv: string[] = []): Promise<void> {
         } finally {
           app.busy.delete("probe");
           bus.emit("job:end", { key: "probe" });
-          bus.emit("models:changed", slots);
+          bus.emit("models:changed", slots, true);
         }
       }
     } catch (e) {
       log(`opencode failed to start: ${(e as Error).message}`);
-      bus.emit("opencode:error", { error: (e as Error).message, stderr: supervisor.stderrTail.slice(-20) });
+      bus.emit("opencode:error", { error: (e as Error).message, stderr: supervisor.stderrTail.slice(-20) }, true);
     }
   })();
 
@@ -249,6 +285,7 @@ export async function main(argv: string[] = []): Promise<void> {
     clearInterval(replyTimer);
     sender.stop();
     server.close();
+    await tunnel.stop();
     await supervisor.stop();
     await unlink(pidFile).catch(() => {});
     process.exit(0);

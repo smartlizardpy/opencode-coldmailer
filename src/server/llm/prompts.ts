@@ -576,3 +576,56 @@ Who they are looking for: ${a.target?.trim() || "(blank)"}
 
 Rewrite these into a name, a goal, and a target_description, and tell them what you changed.`;
 }
+
+/* --------------------------------------------------------------- suggest */
+
+export const SUGGEST_SYSTEM = `You propose campaigns for a business that has already described
+itself. A campaign is one KIND of organisation plus one ask. Your job is to name three that are
+genuinely different from each other, not three rewordings of "our customers".
+
+The most useful suggestions are usually not the obvious one. A business that sells to gyms can
+also write to equipment suppliers who share their customers, to local press who cover openings,
+and to franchise groups who decide for twenty sites at once. Those are three different kinds of
+organisation with three different asks, and only the first is a customer.
+
+Rules:
+- target_description must name a KIND of organisation, never a topic. "small independent local
+  news websites" is a kind. "local news" is a topic, and a search built on a topic comes back
+  full of everything adjacent to it.
+- goal is what THIS email asks for, in one line, and it must be something a stranger could say
+  yes to in one reply. "explore a partnership" is not a first ask; "15 minutes on Thursday" is.
+- Vary the RELATIONSHIP across the three, not just the industry: customer, partner or supplier,
+  and press or community are a good spread when the brief supports them.
+- Use only what the brief supports. Never invent a city, a size or a budget that is not there -
+  if geography is unknown, leave it out of target_description rather than guessing one.
+- why is one sentence on what makes this group reachable, addressed to the person reading it.
+- Write in the language the brief is written in.`;
+
+export const SUGGEST_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["campaigns"],
+  properties: {
+    campaigns: {
+      type: "array", minItems: 1, maxItems: 3,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["name", "goal", "target_description", "relationship", "why"],
+        properties: {
+          name: { type: "string", maxLength: 60 },
+          goal: { type: "string", maxLength: 200 },
+          target_description: { type: "string", maxLength: 500 },
+          relationship: { type: "string", enum: ["customer", "partner", "press", "supplier", "community"] },
+          why: { type: "string", maxLength: 200 },
+        },
+      },
+    },
+  },
+} as const;
+
+export function suggestPrompt(brief: unknown, existing: string[]): string {
+  return `Here is the business, in their own words:
+
+${JSON.stringify(brief, null, 2)}
+
+${existing.length ? `Campaigns they are already running (propose different ones):\n${existing.map((e) => `- ${e}`).join("\n")}\n` : ""}
+Propose up to three campaigns. Different kinds of organisation, different asks.`;
+}

@@ -702,10 +702,21 @@ export interface TargetTest {
  * Writes nothing to campaign_company. The page cache is shared with the real crawl, so
  * testing a site and then running it for real does not fetch twice.
  */
-export async function testTarget(deps: PipelineDeps, campaignId: string, website: string): Promise<TargetTest> {
+export async function testTarget(
+  deps: PipelineDeps,
+  campaignId: string | null,
+  website: string,
+  override: { target?: string; floor?: number } = {},
+): Promise<TargetTest> {
   const { db, llm, fetcher } = deps;
-  const { campaign, product } = getCampaign(db, campaignId);
-  const target = targetOf(campaign, product);
+  // A target can be checked BEFORE the campaign exists - which is the moment it is most worth
+  // checking, because a vague target is cheapest to fix while it is still text in a form.
+  // With no campaign there is nothing to fall back to, so the caller has to supply the words.
+  const stored = campaignId ? getCampaign(db, campaignId) : null;
+  const target = String(override.target ?? "").trim()
+    || (stored ? targetOf(stored.campaign, stored.product) : "");
+  if (!target) throw new Error("describe who you are looking for first");
+  const floor = Number(override.floor ?? stored?.campaign.min_fit_score ?? 45);
 
   let url = website.trim();
   if (!url) throw new Error("enter a domain to test");
@@ -737,12 +748,12 @@ export async function testTarget(deps: PipelineDeps, campaignId: string, website
     prompt: P.recheckPrompt({ target, claimedName: domainOf(url), domain: domainOf(url), pages }),
     schema: P.RECHECK_SCHEMA,
     priority: "interactive",
-    subject: { type: "campaign", id: campaignId },
+    subject: campaignId ? { type: "campaign", id: campaignId } : undefined,
   });
 
   const decision = gateDecision({
     matchesTarget: rc.value.matches_target, fitScore: rc.value.fit_score,
-    floor: Number(campaign.min_fit_score ?? 45),
+    floor,
     targetKind: rc.value.target_kind, entityKind: rc.value.entity_kind,
   });
 
